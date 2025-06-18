@@ -36,6 +36,8 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
 
         self.col_names = X.columns
         self.dtypes = {col: None for col in  self.col_names}
+        self.significances = {}
+        self.scores = {}
 
         ### 1. Assign binary type (assume uniform columns have not been handled before and assign them to be binary)
         ### 2. Handle low-cardinality - (OHE? Leave as cat?)
@@ -97,8 +99,6 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
 
         ### 4. Interpolation test
         if len(numeric_cand_cols)>0:
-            self.significances = {}
-            self.scores = {}
             print("------------")
             X_rem = X_rem[numeric_cand_cols].astype(float)
 
