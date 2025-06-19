@@ -14,7 +14,7 @@ import os
 import time
 
 class FeatureTypeDetector(TransformerMixin, BaseEstimator):
-    def __init__(self, target_type, min_q_as_num=6, n_folds=5):
+    def __init__(self, target_type, min_q_as_num=6, n_folds=5, lgb_model_type="unique-based", assign_numeric=False):
         # TODO: Add hyperparameter for making numeric in string detection optional
         # TODO: Add a hyperparameter to optionally also transform initially categorical features to numeric
         # TODO: Fix multi-class behavior
@@ -23,8 +23,11 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         self.target_type = target_type
         self.min_q_as_num=min_q_as_num
         self.n_folds=n_folds
+        self.lgb_model_type = lgb_model_type
+        self.assign_numeric = assign_numeric
         self.reassigned_features = []
         self.cat_dtype_maps = {}
+
 
     def fit(self, X, y=None, verbose=False):
         if not isinstance(X, pd.DataFrame):
@@ -133,7 +136,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             base_params = {
                 "objective": "binary" if self.target_type=="binary" else "regression",
                 "boosting_type": "gbdt",
-                "n_estimators": 1000,
+                # "n_estimators": 1000,
                 "verbosity": -1
             }
 
@@ -318,6 +321,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             if len(numeric_cand_cols)==0:
                 return  
 
+            # TODO: Test whether SVM with RBF kernel can be useful
             # TODO: Test whether polynomials of a higher degree can be useful
 
             ### Combination test
@@ -329,11 +333,32 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             for cnum, col in enumerate(numeric_cand_cols):                
                 print(f"\rCombination test: {cnum+1}/{len(X_rem.columns)} columns processed", end="", flush=True)
                 x_use = X_rem[[col]].copy()
-                params = base_params.copy()
-                params["max_bin"] = X_rem[col].nunique() #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
-                params["max_depth"] = 2 #if mode=="cat" else 2
-                params["n_estimators"] = X_rem[col].nunique() # 10000 #min(max(int(X[col].nunique()/4),1),100)
+                
+                # TODO: Make a function as it reappears
+                if self.lgb_model_type=="unique-based":
+                    params = base_params.copy()
+                    params["max_bin"] = X_rem[col].nunique() #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
+                    params["max_depth"] = 2 #if mode=="cat" else 2
+                    params["n_estimators"] = X_rem[col].nunique() # 10000 #min(max(int(X[col].nunique()/4),1),100)
+                if self.lgb_model_type=="unique-based-binned":
+                    params = base_params.copy()
+                    params["max_bin"] = int(X_rem[col].nunique()/2) #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
+                    params["max_depth"] = 2 #if mode=="cat" else 2
+                    params["n_estimators"] = X_rem[col].nunique() # 10000 #min(max(int(X[col].nunique()/4),1),100)
+                elif self.lgb_model_type=="high-capacity":
+                    params = base_params.copy()
+                    params["max_bin"] = X_rem[col].nunique() #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
+                    params["n_estimators"] = 10000 #min(max(int(X[col].nunique()/4),1),100)
+                elif self.lgb_model_type=="high-capacity-binned":
+                    params = base_params.copy()
+                    params["max_bin"] = int(X_rem[col].nunique()/2) #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
+                    params["n_estimators"] = 10000 #min(max(int(X[col].nunique()/4),1),100)
+                elif self.lgb_model_type=="default":
+                    params = base_params.copy()
+                else:
+                    raise ValueError(f"Unknown lgb_model_type: {self.lgb_model_type}. Use 'unique-based', 'high-capacity', 'high-capacity-binned' or 'default'.")
 
+                    
                 model = model_class(**params)
                 pipe = Pipeline([("model", model)])
                 self.scores[col]["lgb"] = cv_scores_with_early_stopping(x_use, y, pipe)
@@ -385,10 +410,29 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             for cnum, col in enumerate(comb_cat):                
                 print(f"\rAs-categorical test: {cnum+1}/{len(comb_cat)} columns processed", end="", flush=True)
                 x_use = X_rem[[col]].copy()
-                params = base_params.copy()
-                params["max_bin"] = X_rem[col].nunique() #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
-                params["max_depth"] = 2 #if mode=="cat" else 2
-                params["n_estimators"] = X_rem[col].nunique() # 10000 #min(max(int(X[col].nunique()/4),1),100)
+                if self.lgb_model_type=="unique-based":
+                    params = base_params.copy()
+                    params["max_bin"] = X_rem[col].nunique() #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
+                    params["max_depth"] = 2 #if mode=="cat" else 2
+                    params["n_estimators"] = X_rem[col].nunique() # 10000 #min(max(int(X[col].nunique()/4),1),100)
+                if self.lgb_model_type=="unique-based-binned":
+                    params = base_params.copy()
+                    params["max_bin"] = int(X_rem[col].nunique()/2) #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
+                    params["max_depth"] = 2 #if mode=="cat" else 2
+                    params["n_estimators"] = X_rem[col].nunique() # 10000 #min(max(int(X[col].nunique()/4),1),100)
+                elif self.lgb_model_type=="high-capacity":
+                    params = base_params.copy()
+                    params["max_bin"] = X_rem[col].nunique() #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
+                    params["n_estimators"] = 10000 #min(max(int(X[col].nunique()/4),1),100)
+                elif self.lgb_model_type=="high-capacity-binned":
+                    params = base_params.copy()
+                    params["max_bin"] = int(X_rem[col].nunique()/2) #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
+                    params["n_estimators"] = 10000 #min(max(int(X[col].nunique()/4),1),100)
+                elif self.lgb_model_type=="default":
+                    params = base_params.copy()
+                else:
+                    raise ValueError(f"Unknown lgb_model_type: {self.lgb_model_type}. Use 'unique-based', 'high-capacity', 'high-capacity-binned' or 'default'.")
+
 
                 model = model_class(**params)
                 pipe = Pipeline([("model", model)])
@@ -424,6 +468,14 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         for col in self.col_names:
             for col in self.cat_dtype_maps:
                 X[col] = X[col].astype(str).fillna("nan").astype(self.cat_dtype_maps[col])
+
+        if self.assign_numeric:
+            reassign_cols = [col for col in X.columns if self.dtypes[col]=="numeric" and self.orig_dtypes[col]!="numeric"]
+            for col in reassign_cols:
+                # TODO: Implement functionality for partially coerced columns
+                X[col] = X[col].astype(float)
+
+
 
         return X
 
