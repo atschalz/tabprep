@@ -18,19 +18,26 @@ class CatDetectionMixin:
         X = self.ftd.transform(X)
         X_val = self.ftd.transform(X_val)
         # TODO: Sometimes the detector can introduce missing values if numeric features extracted from strings are used - need to fix that in the ft detection, for now, leave it here
+        self.means = {}
         for col in X.columns:
             if X[col].dtype == float and X[col].isna().any():
-                mean_ = X[col].mean()
-                X[col] = X[col].fillna(mean_)
-                X_val[col] = X_val[col].fillna(mean_)
+                self.means[col] = X[col].mean()
+                X[col] = X[col].fillna(self.means[col])
+                X_val[col] = X_val[col].fillna(self.means[col])
         return super().fit(X=X, y=y, X_val=X_val, y_val=y_val, time_limit=time_limit, **kwargs)
 
     def predict_proba(self, X, *, normalize=None, record_time=False, **kwargs):
         X = self.ftd.transform(X)
+        for col in X.columns:
+            if X[col].dtype == float and X[col].isna().any():
+                X[col] = X[col].fillna(self.means[col])
         return super().predict_proba(X=X, normalize=normalize, record_time=record_time, **kwargs)
 
     def predict(self, X, **kwargs):
         X = self.ftd.transform(X)
+        for col in X.columns:
+            if X[col].dtype == float and X[col].isna().any():
+                X[col] = X[col].fillna(self.means[col])
         return super().predict(X=X, **kwargs)
     
 
