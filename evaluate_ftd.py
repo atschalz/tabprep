@@ -45,10 +45,12 @@ def get_benchmark_dataIDs(benchmark_name):
         return tasks
 
 if __name__ == """__main__""":
-    benchmark = "Grinstajn" # "TabArena", "TabZilla", "Grinstajn"
-    save_name = f"curr_res_{benchmark}.pkl"
-    
+    benchmark = "TabArena" # "TabArena", "TabZilla", "Grinstajn"
+    lgb_model_type = "unique-based-binned"
+    assign_numeric = True
+
     #############
+    save_name = f"curr_res_{benchmark}_lgb={lgb_model_type}_numeric={assign_numeric}"
     results = {}    
     tasks = get_benchmark_dataIDs(benchmark)
     
@@ -80,7 +82,7 @@ if __name__ == """__main__""":
         dtypes = X.dtypes
 
         ######## Feature Type Detection        
-        ftd = FeatureTypeDetector(target_type=target_type)
+        ftd = FeatureTypeDetector(target_type=target_type, lgb_model_type=lgb_model_type, assign_numeric=assign_numeric)
         start = time.time()
         ftd.fit(X,y, verbose=True)
         end = time.time()
