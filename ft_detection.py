@@ -29,13 +29,16 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         self.cat_dtype_maps = {}
 
 
-    def fit(self, X, y=None, verbose=False):
-        if not isinstance(X, pd.DataFrame):
-            X = pd.DataFrame(X)
+    def fit(self, X_input, y_input=None, verbose=False):
+        if not isinstance(X_input, pd.DataFrame):
+            X_input = pd.DataFrame(X_input)
         
         #TODO: Need copy here???
 
-        self.orig_dtypes = {col: "numeric" if dtype in [int, float] else "categorical" for col,dtype in dict(X.dtypes).items()}
+        self.orig_dtypes = {col: "categorical" if dtype in ["object", "category", str] else "numeric" for col,dtype in dict(X_input.dtypes).items()}
+
+        X = X_input.copy()
+        y = y_input.copy()
 
         self.col_names = X.columns
         self.dtypes = {col: None for col in  self.col_names}
