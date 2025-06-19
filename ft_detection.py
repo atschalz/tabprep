@@ -14,9 +14,8 @@ import os
 import time
 
 class FeatureTypeDetector(TransformerMixin, BaseEstimator):
-    def __init__(self, target_type, min_q_as_num=6, n_folds=5, lgb_model_type="unique-based", assign_numeric=False):
+    def __init__(self, target_type, min_q_as_num=6, n_folds=5, lgb_model_type="unique-based", assign_numeric=False, detect_numeric_in_string=True):
         # TODO: Add hyperparameter for making numeric in string detection optional
-        # TODO: Add a hyperparameter to optionally also transform initially categorical features to numeric
         # TODO: Fix multi-class behavior
         # TODO: Think again whether the current proxy model really is the best choice (Might use a small NN instead of LGBM; Might use different HPs )
         # TODO: Implement the parallelization speedup for all interpolation tests 
@@ -25,6 +24,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         self.n_folds=n_folds
         self.lgb_model_type = lgb_model_type
         self.assign_numeric = assign_numeric
+        self.detect_numeric_in_string = detect_numeric_in_string
         self.reassigned_features = []
         self.cat_dtype_maps = {}
 
@@ -69,18 +69,21 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         num_coerced = np.array([int(pd.to_numeric(X_rem[col].dropna(), errors= 'coerce').isna().sum()) for col in X_rem.columns])
         
         numeric_cand_cols = X_rem.columns[num_coerced==0].values.tolist()
-        cat_cols = X_rem.columns[num_coerced==X_rem.shape[0]].values.tolist()
-
         if verbose:
             print(f"{len(numeric_cand_cols)}/{len(rem_cols)} columns can be converted to floats")        
         rem_cols = [x for x in rem_cols if x not in numeric_cand_cols]
 
+        if self.detect_numeric_in_string:
+            cat_cols = X_rem.columns[[num_coerced[num]==X_rem[col].dropna().shape[0] for num, col in enumerate(X_rem.columns)]].values.tolist()
+        else:
+            cat_cols = X_rem.columns[[num_coerced[num]<=X_rem[col].dropna().shape[0] for num, col in enumerate(X_rem.columns)]].values.tolist()
         if verbose:
             print(f"{len(cat_cols)}/{len(rem_cols)} columns are entirely categorical")        
         rem_cols = [x for x in rem_cols if x not in cat_cols]
         for col in cat_cols:
             self.dtypes[col] = "categorical"
-
+        
+        # 4. Try to extract numerical features from string columns
         if len(rem_cols)>0:
             part_coerced = X_rem.columns[[0<c<X_rem.shape[0] for c in num_coerced]].values.tolist()
             if len(part_coerced)>0:
@@ -100,7 +103,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         assert len(rem_cols)==0
 
 
-        ### 4. Interpolation test
+        ### 5. Interpolation test
         if len(numeric_cand_cols)>0:
             print("------------")
             X_rem = X_rem[numeric_cand_cols].astype(float)
