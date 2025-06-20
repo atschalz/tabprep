@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import numpy as np
 
 from tabrepo import EvaluationRepository, Evaluator
 from tabrepo.benchmark.experiment import AGModelBagExperiment, ExperimentBatchRunner
@@ -21,20 +22,58 @@ if __name__ == '__main__':
 
     # Sample for a quick demo
     # datasets = ["maternal_health_risk", "anneal", "customer_satisfaction_in_airline", "MIC", "airfoil_self_noise", "credit-g", "diabetes"]  # 
-    datasets = list(task_metadata["name"])
-    folds = [0]
+    datasets = [ for i in list(task_metadata["name"])]
+    
+    # datasets = [
+                # 'diamonds',
+                # 'MIC',
+                # 'anneal',
+                # 'Diabetes130US',
+                # 'Amazon_employee_access',
+                # 'concrete_compressive_strength',
+                # 'maternal_health_risk',
+                # 'Fitness_Club',
+                # 'churn',
+                # 'coil2000_insurance_policies',
+                # 'airfoil_self_noise',
+                # 'Another-Dataset-on-used-Fiat-500',
+                # 'E-CommereShippingData',
+                # 'customer_satisfaction_in_airline',
+                # 'blood-transfusion-service-center',
+                # 'Bank_Customer_Churn',
+                # 'credit-g',
+                # 'bank-marketing',
+                # 'credit_card_clients_default',
+                # 'Bioresponse',
+                # 'diabetes',
+                # 'APSFailure'
+                # ]
+    folds = [0,1,2]
+
+
+    new_model_name = "LightGBM" # "RealMLP"
+
+    if new_model_name=="RealMLP":
+      from model_with_cat_detection import RealMLPModelWithCatDetection as my_model
+    elif new_model_name=="LightGBM":
+       from model_with_cat_detection import LGBModelWithCatDetection as my_model
+    elif new_model_name=="CatBoost":
+       from model_with_cat_detection import CatBoostModelWithCatDetection as my_model
+
 
     # import your model classes
     # from autogluon.tabular.models import CatBoostModel as my_model
     # from tabrepo.benchmark.models.ag import RealMLPModel as my_model
-    from model_with_cat_detection import RealMLPModelWithCatDetection as my_model
+    # from model_with_cat_detection import RealMLPModelWithCatDetection as my_model
+    # from model_with_cat_detection import LGBModelWithCatDetection as my_model
+
 
     # This list of methods will be fit sequentially on each task (dataset x fold)
     methods = [
         # This will be a `config` in EvaluationRepository, because it computes out-of-fold predictions and thus can be used for post-hoc ensemble.
         AGModelBagExperiment(  # Wrapper for fitting a single bagged model via AutoGluon
             # The name you want the config to have
-            name="RealMLP-catdetect",
+            name=f"{new_model_name}_catdetect",
 
             # The class of the model. Can also be a string if AutoGluon recognizes it, such as `"GBM"`
             # Supports any model that inherits from `autogluon.core.models.AbstractModel`
@@ -89,6 +128,15 @@ if __name__ == '__main__':
         metrics,
         tabarena_results,
     ], ignore_index=True)
+
+    res_df = pd.DataFrame({dat: {method: np.mean(metrics.loc[np.logical_and(metrics.dataset==dat, metrics.method==method), "metric_error"].values) for method in metrics.method.unique()} for dat in metrics.dataset.unique()}).transpose()
+
+    if new_model_name=="RealMLP":
+        print(res_df[[f"{new_model_name}_catdetect", "REALMLP (default)",  "AutoGluon 1.3 (4h)",  "CAT (default)"]])
+    elif new_model_name=="LightGBM":
+        print(res_df[[f"{new_model_name}_catdetect", "GBM (default)",  "AutoGluon 1.3 (4h)",  "CAT (default)"]])
+    elif new_model_name=="CatBoost":
+        print(res_df[[f"{new_model_name}_catdetect", "CAT (default)",  "AutoGluon 1.3 (4h)",  "TABM (default)"]])
 
     with pd.option_context("display.max_rows", None, "display.max_columns", None, "display.width", 1000):
         print(f"Results:\n{metrics.head(100)}")

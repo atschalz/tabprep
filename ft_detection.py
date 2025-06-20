@@ -14,11 +14,8 @@ import os
 import time
 
 class FeatureTypeDetector(TransformerMixin, BaseEstimator):
-    def __init__(self, target_type, min_q_as_num=6, n_folds=5, lgb_model_type="unique-based", assign_numeric=False, detect_numeric_in_string=True):
-        # TODO: Add hyperparameter for making numeric in string detection optional
-        # TODO: Fix multi-class behavior
-        # TODO: Think again whether the current proxy model really is the best choice (Might use a small NN instead of LGBM; Might use different HPs )
-        # TODO: Implement the parallelization speedup for all interpolation tests 
+    def __init__(self, target_type, min_q_as_num=6, n_folds=5, lgb_model_type="unique-based", assign_numeric=False, detect_numeric_in_string=False):
+
         self.target_type = target_type
         self.min_q_as_num=min_q_as_num
         self.n_folds=n_folds
@@ -27,21 +24,24 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         self.detect_numeric_in_string = detect_numeric_in_string
         self.reassigned_features = []
         self.cat_dtype_maps = {}
-
+        # TODO: Fix multi-class behavior
+        # TODO: Think again whether the current proxy model really is the best choice (Might use a small NN instead of LGBM; Might use different HPs )
+        # TODO: Implement the parallelization speedup for all interpolation tests 
+        # TODO: Track how many features have been filtered by which step (mainly needs adding this for interpolation and combination tests)
 
     def fit(self, X_input, y_input=None, verbose=False):
         if not isinstance(X_input, pd.DataFrame):
             X_input = pd.DataFrame(X_input)
+        if not isinstance(y_input, pd.DataFrame):
+            y_input = pd.Series(y_input)
         
-        #TODO: Need copy here???
-
         self.orig_dtypes = {col: "categorical" if dtype in ["object", "category", str] else "numeric" for col,dtype in dict(X_input.dtypes).items()}
 
         X = X_input.copy()
         y = y_input.copy()
 
         self.col_names = X.columns
-        self.dtypes = {col: None for col in  self.col_names}
+        self.dtypes = {col: "None" for col in  self.col_names}
         self.significances = {}
         self.scores = {}
 
@@ -68,40 +68,41 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         rem_cols = [x for x in rem_cols if x not in lowcard_cols]
         
         ### 3. Clearly categoricals
-        X_rem = X[rem_cols].copy()
-        num_coerced = np.array([int(pd.to_numeric(X_rem[col].dropna(), errors= 'coerce').isna().sum()) for col in X_rem.columns])
+        num_coerced = np.array([int(pd.to_numeric(X[col].dropna(), errors= 'coerce').isna().sum()) for col in rem_cols])
         
-        numeric_cand_cols = X_rem.columns[num_coerced==0].values.tolist()
+        numeric_cand_cols = np.array(rem_cols)[num_coerced==0].tolist()
         if verbose:
-            print(f"{len(numeric_cand_cols)}/{len(rem_cols)} columns can be converted to floats")        
+            print(f"{len(numeric_cand_cols)}/{len(num_coerced)} columns can be converted to floats")        
         rem_cols = [x for x in rem_cols if x not in numeric_cand_cols]
-
-        if self.detect_numeric_in_string:
-            cat_cols = X_rem.columns[[num_coerced[num]==X_rem[col].dropna().shape[0] for num, col in enumerate(X_rem.columns)]].values.tolist()
+        
+        if self.detect_numeric_in_string: # Currently doesn't work!!!! - see TODO below
+            cat_cols = np.array(rem_cols)[[num_coerced[num]==X[col].dropna().shape[0] for num, col in enumerate(rem_cols)]].tolist()
         else:
-            cat_cols = X_rem.columns[[num_coerced[num]<=X_rem[col].dropna().shape[0] for num, col in enumerate(X_rem.columns)]].values.tolist()
+            cat_cols = np.array(rem_cols)[[num_coerced[num]<=X[col].dropna().shape[0] for num, col in enumerate(rem_cols)]].tolist()
+        
         if verbose:
-            print(f"{len(cat_cols)}/{len(rem_cols)} columns are entirely categorical")        
+            print(f"{len(cat_cols)}/{len(num_coerced)} columns are entirely categorical")        
         rem_cols = [x for x in rem_cols if x not in cat_cols]
         for col in cat_cols:
             self.dtypes[col] = "categorical"
         
         # 4. Try to extract numerical features from string columns
-        if len(rem_cols)>0:
-            part_coerced = X_rem.columns[[0<c<X_rem.shape[0] for c in num_coerced]].values.tolist()
-            if len(part_coerced)>0:
-                X_copy = X_rem.loc[:, part_coerced].apply(clean_series)
-                X_rem = X_rem.drop(columns=part_coerced)
-                X_rem[part_coerced] = X_copy
-            all_nan = X_rem.columns[X_rem.isna().mean()==1]
-            if verbose:
-                print(f"{len(part_coerced)}/{len(rem_cols)} columns are partially numerical. {len(all_nan)} of them don't show regular patterns and are treated as categorical.")        
+        # TODO: To apply this, we would need to integrate it in the fit-transform logic. Therefore, disable for now.
+        # if len(rem_cols)>0:
+        #     num_coerced = np.array([int(pd.to_numeric(X[col].dropna(), errors= 'coerce').isna().sum()) for col in rem_cols])
+        #     part_coerced = np.array(rem_cols)[[0<c<X[col].dropna().shape[0] for c, col in zip(num_coerced, rem_cols)]].tolist()
+        #     if len(part_coerced)>0:
+        #         X_copy = X.loc[:, part_coerced].apply(clean_series)
+        #         X[part_coerced] = X_copy
+        #     all_nan = X_rem.columns[X_rem.isna().mean()==1]
+        #     if verbose:
+        #         print(f"{len(part_coerced)}/{len(rem_cols)} columns are partially numerical. {len(all_nan)} of them don't show regular patterns and are treated as categorical.")        
             
-            if len(all_nan)>0:
-                for col in all_nan:
-                    self.dtypes[col] = "categorical"
-            rem_cols = [x for x in rem_cols if x not in part_coerced]
-            numeric_cand_cols += [x for x in part_coerced if x not in all_nan]
+        #     if len(all_nan)>0:
+        #         for col in all_nan:
+        #             self.dtypes[col] = "categorical"
+        #     rem_cols = [x for x in rem_cols if x not in part_coerced]
+        #     numeric_cand_cols += [x for x in part_coerced if x not in all_nan]
             
         assert len(rem_cols)==0
 
@@ -109,9 +110,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         ### 5. Interpolation test
         if len(numeric_cand_cols)>0:
             print("------------")
-            X_rem = X_rem[numeric_cand_cols].astype(float)
-
-
+            X_rem = X[numeric_cand_cols].copy().astype(float) # TODO: Assure that .asfloat() is sufficient to correctly treat the columns as numeric
 
             print(f"{len(numeric_cand_cols)} columns left for numeric/categorical detection")
 
@@ -158,7 +157,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
 
             # Linear Interpolation test
             linear_interpol_cols = []
-            # TODO: Parallelize Trget mean detection for regression
+            # TODO: Parallelize Target mean detection for regression
             if self.target_type == "regression":
                 for cnum, col in enumerate(X_rem.columns):
                     self.scores[col] = {}
@@ -214,16 +213,15 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                 #     print(pipe)
                 linear_res = cv_scores_with_early_stopping_vec(X_rem, y, pipe)
 
-                for cnum, col in enumerate(X_rem.columns):
+                for cnum, col in enumerate(numeric_cand_cols):
+                    x_use = X_rem[col].copy()
                     self.scores[col] = {}
-                    print(f"\rLinear interpolation test: {cnum}/{len(X_rem.columns)} columns processed", end="", flush=True)
+                    print(f"\rLinear interpolation test: {cnum}/{len(numeric_cand_cols)} columns processed", end="", flush=True)
                     self.significances[col] = {}
 
                     # dummy baseline on single column (currently not used)
                     dummy_pipe = Pipeline([("model", dummy)])
-                    self.scores[col]["dummy"] = cv_scores_with_early_stopping(X_rem[[col]], y, dummy_pipe)
-
-                    x_use = X_rem[col].copy()
+                    self.scores[col]["dummy"] = cv_scores_with_early_stopping(x_use.to_frame(), y, dummy_pipe)
                     
                     # model = (TargetMeanClassifier() if self.target_type=="binary"
                     #         else TargetMeanRegressor())
@@ -253,7 +251,6 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                 print("\n")
                 print(f"{len(linear_interpol_cols)}/{len(numeric_cand_cols)} columns are numeric acc. to linear interpolation test.")        
             
-            X_rem = X_rem.drop(linear_interpol_cols,axis=1)
             numeric_cand_cols = [x for x in numeric_cand_cols if x not in linear_interpol_cols]
             
             if len(numeric_cand_cols)==0:
@@ -264,7 +261,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             poly2_interpol_cols = []
 
             for cnum, col in enumerate(numeric_cand_cols):                
-                print(f"\r2-polynomial interpolation test: {cnum+1}/{len(X_rem.columns)} columns processed", end="", flush=True)
+                print(f"\r2-polynomial interpolation test: {cnum+1}/{len(numeric_cand_cols)} columns processed", end="", flush=True)
                 x_use = X_rem[col].copy()
                 
                 pipe = Pipeline([
@@ -288,7 +285,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                 print("\n")
                 print(f"{len(poly2_interpol_cols)}/{len(numeric_cand_cols)} columns are numeric acc. to 2-polynomial interpolation test.")        
             
-            X_rem = X_rem.drop(poly2_interpol_cols,axis=1)
+
             numeric_cand_cols = [x for x in numeric_cand_cols if x not in poly2_interpol_cols]
             
             if len(numeric_cand_cols)==0:
@@ -297,7 +294,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             poly3_interpol_cols = []
 
             for cnum, col in enumerate(numeric_cand_cols):                
-                print(f"\r3-polynomial interpolation test: {cnum+1}/{len(X_rem.columns)} columns processed", end="", flush=True)
+                print(f"\r3-polynomial interpolation test: {cnum+1}/{len(numeric_cand_cols)} columns processed", end="", flush=True)
                 x_use = X_rem[col].copy()
                 pipe = Pipeline([
                     ("impute", SimpleImputer(strategy="median")), 
@@ -321,7 +318,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             if verbose:
                 print("\n")
                 print(f"{len(poly3_interpol_cols)}/{len(numeric_cand_cols)} columns are numeric acc. to 3-polynomial interpolation test.")        
-            X_rem = X_rem.drop(poly3_interpol_cols,axis=1)
+
             numeric_cand_cols = [x for x in numeric_cand_cols if x not in poly3_interpol_cols]
             
             if len(numeric_cand_cols)==0:
@@ -337,7 +334,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             comb_bothfine = []
             irrelevant_cols = []
             for cnum, col in enumerate(numeric_cand_cols):                
-                print(f"\rCombination test: {cnum+1}/{len(X_rem.columns)} columns processed", end="", flush=True)
+                print(f"\rCombination test: {cnum+1}/{len(numeric_cand_cols)} columns processed", end="", flush=True)
                 x_use = X_rem[[col]].copy()
                 
                 # TODO: Make a function as it reappears
@@ -462,15 +459,22 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             reassign_cols = [col for col in X.columns if self.dtypes[col]=="categorical" and self.orig_dtypes[col]!="categorical"]
             for col in reassign_cols:
                 self.cat_dtype_maps[col] = pd.CategoricalDtype(categories=list(X[col].astype(str).fillna("nan").unique()))
+                # TODO: CHange to use only train
+            
+            if self.assign_numeric:
+                reassign_cols = [col for col in X.columns if self.dtypes[col]=="numeric" and self.orig_dtypes[col]!="numeric"]
+                self.numeric_means = {col: X_rem[col].mean() for col in reassign_cols}
 
             return 
         else:
             return 
 
+    def transform(self, X_input):
+        if not isinstance(X_input, pd.DataFrame):
+            X_input = pd.DataFrame(X_input)
 
+        X = X_input.copy()
 
-
-    def transform(self, X):
         for col in self.cat_dtype_maps:
             X[col] = X[col].astype(str).fillna("nan").astype(self.cat_dtype_maps[col])
 
@@ -479,11 +483,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             for col in reassign_cols:
                 # TODO: Implement functionality for partially coerced columns
                 X[col] = X[col].astype(float)
-
-
+                if X[col].isna().any() and self.orig_dtypes==[col]=="categorical":
+                    X[col] = X[col].fillna(self.numeric_means[col])
 
         return X
-
-    def fit_transform(self, X):
-        return self.fit(X).transform(X)
-
