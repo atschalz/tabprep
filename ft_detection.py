@@ -14,13 +14,20 @@ import os
 import time
 
 class FeatureTypeDetector(TransformerMixin, BaseEstimator):
-    def __init__(self, target_type, min_q_as_num=6, n_folds=5, lgb_model_type="unique-based", assign_numeric=False, detect_numeric_in_string=False, use_highest_corr_feature=False, num_corr_feats_use=0):
+    def __init__(self, target_type, min_q_as_num=6, n_folds=5, 
+                 lgb_model_type="unique-based", 
+                 assign_numeric=False, 
+                 assign_numeric_with_combination=False,
+                 detect_numeric_in_string=False, 
+                 use_highest_corr_feature=False, num_corr_feats_use=0,
+                 ):
 
         self.target_type = target_type
         self.min_q_as_num = min_q_as_num
         self.n_folds = n_folds
         self.lgb_model_type = lgb_model_type
         self.assign_numeric = assign_numeric
+        self.assign_numeric_with_combination = assign_numeric_with_combination
         self.detect_numeric_in_string = detect_numeric_in_string
         self.use_highest_corr_feature = use_highest_corr_feature
         self.num_corr_feats_use = num_corr_feats_use
@@ -509,8 +516,11 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                 if self.significances[col]["test_cat_superior"]<0.05:
                     cat_improve_cols.append(col)
                 else:
-                    self.dtypes[col] = "mean>lgb>=lgb-cat" 
-
+                    if self.assign_numeric_with_combination:
+                        self.dtypes[col] = "numeric"
+                    else:
+                        self.dtypes[col] = "mean>lgb>=lgb-cat"
+            
             if verbose:
                 print("\n")
                 print(f"For {len(cat_improve_cols)}/{len(comb_cat)} columns performance can be improved by transforming to categorical.")
