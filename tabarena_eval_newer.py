@@ -14,47 +14,51 @@ from tabrepo.nips2025_utils import load_results
 
 
 if __name__ == '__main__':
-    expname = str(Path(__file__).parent / "experiments" / "quickstart")  # folder location to save all experiment artifacts
-    repo_dir = str(Path(__file__).parent / "repos" / "quickstart")  # Load the repo later via `EvaluationRepository.from_dir(repo_dir)`
-    ignore_cache = False  # set to True to overwrite existing caches and re-run experiments from scratch
+    expname = str(Path(__file__).parent / "experiments" / "current")  # folder location to save all experiment artifacts
+    repo_dir = str(Path(__file__).parent / "repos" / "current")  # Load the repo later via `EvaluationRepository.from_dir(repo_dir)`
+    ignore_cache = True  # set to True to overwrite existing caches and re-run experiments from scratch
+
+    
 
     task_metadata = load_task_metadata()
 
     # Sample for a quick demo
     # datasets = ["maternal_health_risk", "anneal", "customer_satisfaction_in_airline", "MIC", "airfoil_self_noise", "credit-g", "diabetes"]  # 
-    datasets = [ for i in list(task_metadata["name"])]
+    datasets = [i for i in list(task_metadata["name"])]
     
-    # datasets = [
-                # 'diamonds',
-                # 'MIC',
-                # 'anneal',
-                # 'Diabetes130US',
-                # 'Amazon_employee_access',
-                # 'concrete_compressive_strength',
-                # 'maternal_health_risk',
-                # 'Fitness_Club',
-                # 'churn',
-                # 'coil2000_insurance_policies',
-                # 'airfoil_self_noise',
-                # 'Another-Dataset-on-used-Fiat-500',
-                # 'E-CommereShippingData',
-                # 'customer_satisfaction_in_airline',
-                # 'blood-transfusion-service-center',
-                # 'Bank_Customer_Churn',
-                # 'credit-g',
-                # 'bank-marketing',
-                # 'credit_card_clients_default',
-                # 'Bioresponse',
-                # 'diabetes',
-                # 'APSFailure'
-                # ]
-    folds = [0,1,2]
+    # datasets = [#'Food_Delivery_Time', 
+    #     'MIC', 
+    #     'SDSS17', 
+    #     'anneal', 
+    # 'airfoil_self_noise',
+    #    'kddcup09_appetency', 'coil2000_insurance_policies', 'Diabetes130US',
+    #    'heloc', 'E-CommereShippingData', 'in_vehicle_coupon_recommendation',
+    #    'Amazon_employee_access', 'churn', 'Fitness_Club',
+    #    'online_shoppers_intention', 'credit_card_clients_default',
+    #    'HR_Analytics_Job_Change_of_Data_Scientists', 'GiveMeSomeCredit',
+    #    'customer_satisfaction_in_airline', 'Is-this-a-good-customer',
+    #    'qsar-biodeg', 'Bioresponse', 
+    # 'maternal_health_risk',
+    #    'students_dropout_and_academic_success', 
+    #    'superconductivity',
+    # "website_phishing"
+    # ]
 
+    folds = [0] #,1,2]
 
-    new_model_name = "LightGBM" # "RealMLP"
+    # TODO: Need to change the metadata after my stuff
+    new_model_name =  "LightGBM"
 
-    if new_model_name=="RealMLP":
+    if new_model_name=="RealMLP-original":
+        from tabrepo.benchmark.models.ag import RealMLPModel as my_model
+    if new_model_name=="TabM-original":
+        from tabrepo.benchmark.models.ag import TabMModel as my_model
+    if new_model_name=="LightGBM-original":
+        from autogluon.tabular.models import LGBModel as my_model
+    elif new_model_name=="RealMLP":
       from model_with_cat_detection import RealMLPModelWithCatDetection as my_model
+    elif new_model_name=="TabM":
+        from model_with_cat_detection import TabMModelWithCatDetection as my_model
     elif new_model_name=="LightGBM":
        from model_with_cat_detection import LGBModelWithCatDetection as my_model
     elif new_model_name=="CatBoost":
@@ -82,7 +86,7 @@ if __name__ == '__main__':
                 # "ag_args_ensemble": {"fold_fitting_strategy": "sequential_local"},  # uncomment to fit folds sequentially, allowing for use of a debugger
             },  # The non-default model hyperparameters.
             num_bag_folds=8,  # num_bag_folds=8 was used in the TabArena 2025 paper
-            time_limit=3600,  # time_limit=3600 was used in the TabArena 2025 paper
+            time_limit=360000,  # time_limit=3600 was used in the TabArena 2025 paper
         ),
     ]
 
@@ -96,6 +100,13 @@ if __name__ == '__main__':
         methods=methods,
         ignore_cache=ignore_cache,
     )
+
+    for res in results_lst:
+        info = res["method_metadata"]["info"]["children_info"]
+        print(f'{res["task_metadata"]["name"]}:') 
+        print(f'Reassigned as categoricals: {[len(info[c]["new_categorical"]) for c in info]}')
+        print(f'Reassigned as numerics: {[len(info[c]["new_numeric"]) for c in info]}')
+        print("--"*20)
 
     experiment_results = ExperimentResults(task_metadata=task_metadata)
 
@@ -133,6 +144,8 @@ if __name__ == '__main__':
 
     if new_model_name=="RealMLP":
         print(res_df[[f"{new_model_name}_catdetect", "REALMLP (default)",  "AutoGluon 1.3 (4h)",  "CAT (default)"]])
+    elif new_model_name=="TabM":
+        print(res_df[[f"{new_model_name}_catdetect", "TABM (default)",  "AutoGluon 1.3 (4h)",  "CAT (default)"]])
     elif new_model_name=="LightGBM":
         print(res_df[[f"{new_model_name}_catdetect", "GBM (default)",  "AutoGluon 1.3 (4h)",  "CAT (default)"]])
     elif new_model_name=="CatBoost":
