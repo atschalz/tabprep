@@ -20,6 +20,7 @@ parts/
 sdist/
 experiments/
 repos/
+AutoGluonModels/
 var/
 wheels/
 share/python-wheels/
