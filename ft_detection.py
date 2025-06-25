@@ -42,6 +42,11 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         X = X_input.copy()
         y = y_input.copy()
 
+        if self.target_type=="multiclass":
+            # TODO: Fix this hack
+            y = (y==y.value_counts().index[0]).astype(int)  # make it binary
+            self.target_type = "binary"
+
         self.col_names = X.columns
         self.dtypes = {col: "None" for col in  self.col_names}
         self.significances = {}
