@@ -14,14 +14,16 @@ import os
 import time
 
 class FeatureTypeDetector(TransformerMixin, BaseEstimator):
-    def __init__(self, target_type, min_q_as_num=6, n_folds=5, lgb_model_type="unique-based", assign_numeric=False, detect_numeric_in_string=False):
+    def __init__(self, target_type, min_q_as_num=6, n_folds=5, lgb_model_type="unique-based", assign_numeric=False, detect_numeric_in_string=False, use_highest_corr_feature=False, num_corr_feats_use=0):
 
         self.target_type = target_type
-        self.min_q_as_num=min_q_as_num
-        self.n_folds=n_folds
+        self.min_q_as_num = min_q_as_num
+        self.n_folds = n_folds
         self.lgb_model_type = lgb_model_type
         self.assign_numeric = assign_numeric
         self.detect_numeric_in_string = detect_numeric_in_string
+        self.use_highest_corr_feature = use_highest_corr_feature
+        self.num_corr_feats_use = num_corr_feats_use
         self.reassigned_features = []
         self.cat_dtype_maps = {}
         # TODO: Fix multi-class behavior
@@ -75,6 +77,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             print(f"{len(numeric_cand_cols)}/{len(num_coerced)} columns can be converted to floats")        
         rem_cols = [x for x in rem_cols if x not in numeric_cand_cols]
         
+        num_coerced = np.array([int(pd.to_numeric(X[col].dropna(), errors= 'coerce').isna().sum()) for col in rem_cols])
         if self.detect_numeric_in_string: # Currently doesn't work!!!! - see TODO below
             cat_cols = np.array(rem_cols)[[num_coerced[num]==X[col].dropna().shape[0] for num, col in enumerate(rem_cols)]].tolist()
         else:
@@ -219,7 +222,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                     print(f"\rLinear interpolation test: {cnum}/{len(numeric_cand_cols)} columns processed", end="", flush=True)
                     self.significances[col] = {}
 
-                    # dummy baseline on single column (currently not used)
+                    # dummy baseline on single column 
                     dummy_pipe = Pipeline([("model", dummy)])
                     self.scores[col]["dummy"] = cv_scores_with_early_stopping(x_use.to_frame(), y, dummy_pipe)
                     
@@ -244,8 +247,6 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                         self.dtypes[col] = "numeric"
 
                         linear_interpol_cols.append(col)
-
-
             
             if verbose:
                 print("\n")
@@ -255,7 +256,60 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             
             if len(numeric_cand_cols)==0:
                 return 
-            
+
+            # TODO: Rename X_rem to X_num (but verify that this is what it represents)
+            # Linear interpolation test for highest corr feature
+            if self.use_highest_corr_feature:
+                
+                n_cols_start = len(numeric_cand_cols)
+                linear_interpol_cols_feat = []
+                for n_col in range(min([self.num_corr_feats_use, X_rem.shape[1]-1])):
+                    linear_feat = UnivariateLinearRegressor()
+                    scorer_feat = lambda ytr, ypr: -root_mean_squared_error(ytr, ypr)
+                    cv_feat = KFold(n_splits=self.n_folds, shuffle=True, random_state=42)
+                    cv_scores_with_early_stopping_feat = make_cv_scores_with_early_stopping(target_type="regression", scorer=scorer_feat, cv=cv_feat, early_stopping_rounds=20, vectorized=False)
+
+                    for cnum, col in enumerate(numeric_cand_cols):
+                    
+                        print(f"\rLinear interpolation test ({n_col+1}-high-corr feature): {cnum+1}/{len(numeric_cand_cols)} columns processed", end="/n", flush=False)
+                        x_use = X_rem[col].copy()
+                        x_use = x_use.fillna(x_use.mean()).astype(float)
+
+                        # TODO: On some datasets, sometimes an annoying warning appears - make sure that doesnt happen
+                        filtered_df = X_rem.drop(col, axis=1)
+                        y_use = filtered_df[filtered_df.corrwith(x_use, drop=True).abs().sort_values(ascending=False).index[n_col]]
+                        y_use = y_use.fillna(y_use.mean()).astype(float)
+
+                        y_use = pd.Series(MinMaxScaler().fit_transform(y_use.values.reshape(-1, 1)).flatten(), index=y_use.index, name= y_use.name)
+
+                        model = TargetMeanRegressor()
+                        pipe = Pipeline([("model", model)])
+                        self.scores[col][f"mean-feat-{n_col+1}"] = cv_scores_with_early_stopping_feat(x_use.to_frame(), y_use, pipe)
+
+                        pipe = Pipeline([
+                            ("impute", SimpleImputer(strategy="median")), 
+                            ("standardize", StandardScaler(
+                            )),
+                            ("model", linear_feat)
+                        ])
+                        self.scores[col][f"linear-feat-{n_col+1}"] = cv_scores_with_early_stopping_feat(x_use.to_frame(), y_use, pipe)
+
+                        self.significances[col][f"test_linear-feat_superior-{n_col+1}"] = p_value_wilcoxon_greater_than_zero(
+                            self.scores[col][f"linear-feat-{n_col+1}"] - self.scores[col][f"mean-feat-{n_col+1}"]
+                        )
+
+                        if self.significances[col][f"test_linear-feat_superior-{n_col+1}"]<0.05:
+                            self.dtypes[col] = "numeric"
+                            linear_interpol_cols_feat.append(col)
+                    numeric_cand_cols = [x for x in numeric_cand_cols if x not in linear_interpol_cols_feat]
+                    if len(numeric_cand_cols)==0:
+                        break
+                if verbose:
+                    print("\n")
+                    print(f"{len(linear_interpol_cols_feat)}/{n_cols_start} columns are numeric acc. to linear interpolation test on highest correlated feature.")
+
+                if len(numeric_cand_cols)==0:
+                    return 
 
             # Interpolation test for polynomial of degree=2
             poly2_interpol_cols = []
@@ -290,6 +344,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             
             if len(numeric_cand_cols)==0:
                 return 
+
             # Interpolation test for polynomial of degree=3
             poly3_interpol_cols = []
 
@@ -324,9 +379,9 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             if len(numeric_cand_cols)==0:
                 return  
 
-            # TODO: Test whether SVM with RBF kernel can be useful
             # TODO: Test whether polynomials of a higher degree can be useful
 
+            # TODO: Combination test likely is only required if there are still numeric candidate columns left that were not already classified as categorical by the previous tests
             ### Combination test
             # TODO: Test whether using a sklearn decision tree can speed things up
             comb_num = []
@@ -343,7 +398,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                     params["max_bin"] = X_rem[col].nunique() #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
                     params["max_depth"] = 2 #if mode=="cat" else 2
                     params["n_estimators"] = X_rem[col].nunique() # 10000 #min(max(int(X[col].nunique()/4),1),100)
-                if self.lgb_model_type=="unique-based-binned":
+                elif self.lgb_model_type=="unique-based-binned":
                     params = base_params.copy()
                     params["max_bin"] = int(X_rem[col].nunique()/2) #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
                     params["max_depth"] = 2 #if mode=="cat" else 2
@@ -394,7 +449,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                         self.dtypes[col] = "numeric"
                         comb_num.append(col)
                     else:
-                        self.dtypes[col] = "indifferent" #self.orig_dtypes[col]
+                        self.dtypes[col] = "indifferent" 
                         comb_bothfine.append(col)
                 else:
                     self.dtypes[col] = "irrelevant"
@@ -418,7 +473,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                     params["max_bin"] = X_rem[col].nunique() #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
                     params["max_depth"] = 2 #if mode=="cat" else 2
                     params["n_estimators"] = X_rem[col].nunique() # 10000 #min(max(int(X[col].nunique()/4),1),100)
-                if self.lgb_model_type=="unique-based-binned":
+                elif self.lgb_model_type=="unique-based-binned":
                     params = base_params.copy()
                     params["max_bin"] = int(X_rem[col].nunique()/2) #min([10000, X_rem[col].nunique()]) #if mode=="cat" else 2
                     params["max_depth"] = 2 #if mode=="cat" else 2
@@ -482,7 +537,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             reassign_cols = [col for col in X.columns if self.dtypes[col]=="numeric" and self.orig_dtypes[col]!="numeric"]
             for col in reassign_cols:
                 # TODO: Implement functionality for partially coerced columns
-                X[col] = X[col].astype(float)
+                X[col] = pd.to_numeric(X[col], errors= 'coerce').astype(float)
                 if X[col].isna().any() and self.orig_dtypes==[col]=="categorical":
                     X[col] = X[col].fillna(self.numeric_means[col])
 
