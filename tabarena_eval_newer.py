@@ -16,16 +16,23 @@ from tabrepo.nips2025_utils import load_results
 if __name__ == '__main__':
     expname = str(Path(__file__).parent / "experiments" / "current")  # folder location to save all experiment artifacts
     repo_dir = str(Path(__file__).parent / "repos" / "current")  # Load the repo later via `EvaluationRepository.from_dir(repo_dir)`
-    ignore_cache = True  # set to True to overwrite existing caches and re-run experiments from scratch
-
-    
+    ignore_cache = False  # set to True to overwrite existing caches and re-run experiments from scratch
 
     task_metadata = load_task_metadata()
 
     # Sample for a quick demo
     # datasets = ["maternal_health_risk", "anneal", "customer_satisfaction_in_airline", "MIC", "airfoil_self_noise", "credit-g", "diabetes"]  # 
-    datasets = [i for i in list(task_metadata["name"])]
-    
+    # datasets = [i for i in list(task_metadata["name"]) if i not in ['superconductivity']]  # Exclude some datasets for a quick demo
+    datasets = ['Bioresponse',
+        'Food_Delivery_Time',
+        'SDSS17',
+        'airfoil_self_noise',
+        'coil2000_insurance_policies',
+        'customer_satisfaction_in_airline',
+        'heloc',
+        'students_dropout_and_academic_success',
+        'superconductivity']
+     
     # datasets = [#'Food_Delivery_Time', 
     #     'MIC', 
     #     'SDSS17', 
@@ -44,17 +51,19 @@ if __name__ == '__main__':
     # "website_phishing"
     # ]
 
-    folds = [0] #,1,2]
+    folds = [0,1,2]
 
     # TODO: Need to change the metadata after my stuff
-    new_model_name =  "LightGBM"
+    new_model_name =  "CatBoost_priordetect"
 
-    if new_model_name=="RealMLP-original":
+    if new_model_name in ["RealMLP-original", "RealMLP_priordetect"]:
         from tabrepo.benchmark.models.ag import RealMLPModel as my_model
-    if new_model_name=="TabM-original":
+    elif new_model_name in ["TabM-original", "TabM_priordetect"]:
         from tabrepo.benchmark.models.ag import TabMModel as my_model
-    if new_model_name=="LightGBM-original":
+    elif new_model_name in ["LightGBM-original", "LightGBM_priordetect"]:
         from autogluon.tabular.models import LGBModel as my_model
+    elif new_model_name in ["CatBoost-original", "CatBoost_priordetect"]:
+        from autogluon.tabular.models import CatBoostModel as my_model
     elif new_model_name=="RealMLP":
       from model_with_cat_detection import RealMLPModelWithCatDetection as my_model
     elif new_model_name=="TabM":
@@ -99,14 +108,15 @@ if __name__ == '__main__':
         folds=folds,
         methods=methods,
         ignore_cache=ignore_cache,
+        use_ftd=True,
     )
 
-    for res in results_lst:
-        info = res["method_metadata"]["info"]["children_info"]
-        print(f'{res["task_metadata"]["name"]}:') 
-        print(f'Reassigned as categoricals: {[len(info[c]["new_categorical"]) for c in info]}')
-        print(f'Reassigned as numerics: {[len(info[c]["new_numeric"]) for c in info]}')
-        print("--"*20)
+    # for res in results_lst:
+    #     info = res["method_metadata"]["info"]["children_info"]
+    #     print(f'{res["task_metadata"]["name"]}:') 
+    #     print(f'Reassigned as categoricals: {[len(info[c]["new_categorical"]) for c in info]}')
+    #     print(f'Reassigned as numerics: {[len(info[c]["new_numeric"]) for c in info]}')
+    #     print("--"*20)
 
     experiment_results = ExperimentResults(task_metadata=task_metadata)
 
@@ -146,7 +156,7 @@ if __name__ == '__main__':
         print(res_df[[f"{new_model_name}_catdetect", "REALMLP (default)",  "AutoGluon 1.3 (4h)",  "CAT (default)"]])
     elif new_model_name=="TabM":
         print(res_df[[f"{new_model_name}_catdetect", "TABM (default)",  "AutoGluon 1.3 (4h)",  "CAT (default)"]])
-    elif new_model_name=="LightGBM":
+    elif new_model_name in ["LightGBM", "LightGBM_priordetect"]:
         print(res_df[[f"{new_model_name}_catdetect", "GBM (default)",  "AutoGluon 1.3 (4h)",  "CAT (default)"]])
     elif new_model_name=="CatBoost":
         print(res_df[[f"{new_model_name}_catdetect", "CAT (default)",  "AutoGluon 1.3 (4h)",  "TABM (default)"]])
