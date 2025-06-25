@@ -15,7 +15,7 @@ import time
 
 class FeatureTypeDetector(TransformerMixin, BaseEstimator):
     def __init__(self, target_type, min_q_as_num=6, n_folds=5, 
-                 lgb_model_type="unique-based", 
+                 lgb_model_type="unique-based-binned", 
                  assign_numeric=False, 
                  assign_numeric_with_combination=False,
                  detect_numeric_in_string=False, 
@@ -37,7 +37,10 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         # TODO: Think again whether the current proxy model really is the best choice (Might use a small NN instead of LGBM; Might use different HPs )
         # TODO: Implement the parallelization speedup for all interpolation tests 
         # TODO: Track how many features have been filtered by which step (mainly needs adding this for interpolation and combination tests)
-
+        # TODO: Implement option to drop duplicates
+        # TODO: Separate repetitive functions like the interpolation test into a separate function
+        # TODO: Add option to add an additional categorical feature instead of reassigning the feature type
+    
     def fit(self, X_input, y_input=None, verbose=False):
         if not isinstance(X_input, pd.DataFrame):
             X_input = pd.DataFrame(X_input)
@@ -53,6 +56,8 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             # TODO: Fix this hack
             y = (y==y.value_counts().index[0]).astype(int)  # make it binary
             self.target_type = "binary"
+        elif self.target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
+            y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
 
         self.col_names = X.columns
         self.dtypes = {col: "None" for col in  self.col_names}
@@ -557,3 +562,15 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                     X[col] = X[col].fillna(self.numeric_means[col])
 
         return X
+
+    def get_params(self, deep=True):
+        return {
+            "min_q_as_num": self.min_q_as_num,
+            "n_folds": self.n_folds,
+            "lgb_model_type": self.lgb_model_type,
+            "assign_numeric": self.assign_numeric,
+            "assign_numeric_with_combination": self.assign_numeric_with_combination,
+            "detect_numeric_in_string": self.detect_numeric_in_string,
+            "use_highest_corr_feature": self.use_highest_corr_feature,
+            "num_corr_feats_use": self.num_corr_feats_use
+        }
