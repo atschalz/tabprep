@@ -13,6 +13,17 @@ from sklearn.linear_model import LogisticRegression
 import os
 import time
 
+
+def clean_feature_names(X_input: pd.DataFrame):
+    X = X_input.copy()
+    X.columns = [str(col).replace('[', '').replace(']', '').replace(':', '')
+                                            .replace('<', '').replace('>', '')
+                                            .replace('=', '').replace(',', '')
+                                            .replace(' ', '_') for col in X.columns]
+    
+    return X
+
+
 class FeatureTypeDetector(TransformerMixin, BaseEstimator):
     def __init__(self, target_type, min_q_as_num=6, n_folds=5, 
                  lgb_model_type="unique-based-binned", 
@@ -436,7 +447,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                     
                 model = model_class(**params)
                 pipe = Pipeline([("model", model)])
-                self.scores[col]["lgb"] = cv_scores_with_early_stopping(x_use, y, pipe)
+                self.scores[col]["lgb"] = cv_scores_with_early_stopping(clean_feature_names(x_use), y, pipe)
 
 
                 self.significances[col]["test_lgb_superior"] = p_value_wilcoxon_greater_than_zero(
@@ -511,7 +522,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
 
                 model = model_class(**params)
                 pipe = Pipeline([("model", model)])
-                self.scores[col]["lgb-cat"] = cv_scores_with_early_stopping(x_use.astype("category"), y, pipe)
+                self.scores[col]["lgb-cat"] = cv_scores_with_early_stopping(clean_feature_names(x_use).astype("category"), y, pipe)
 
 
                 self.significances[col]["test_cat_superior"] = p_value_wilcoxon_greater_than_zero(
@@ -544,15 +555,20 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         else:
             return 
 
-    def transform(self, X_input):
+    def transform(self, X_input, mode = "overwrite"):
         if not isinstance(X_input, pd.DataFrame):
             X_input = pd.DataFrame(X_input)
 
         X = X_input.copy()
 
         for col in self.cat_dtype_maps:
-            X[col] = X[col].astype(str).fillna("nan").astype(self.cat_dtype_maps[col])
-
+            if mode == "overwrite":
+                X[col] = X[col].astype(str).fillna("nan").astype(self.cat_dtype_maps[col])
+            elif mode == "add":
+                X[col+'_cat'] = X[col].astype(str).fillna("nan").astype(self.cat_dtype_maps[col])
+                self.dtypes[col+'_cat'] = "categorical"
+                self.orig_dtypes[col+'_cat'] = "categorical"
+        
         if self.assign_numeric:
             reassign_cols = [col for col in X.columns if self.dtypes[col]=="numeric" and self.orig_dtypes[col]!="numeric"]
             for col in reassign_cols:
