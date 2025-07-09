@@ -11,16 +11,18 @@ from matplotlib.backends.backend_pdf import PdfPages
 from scipy.stats import ttest_1samp, wilcoxon, binomtest
 import pickle
 
-from sklearn.model_selection import StratifiedKFold, KFold, cross_val_score
+from sklearn.model_selection import StratifiedKFold, KFold, cross_val_score, StratifiedGroupKFold, GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.dummy import DummyRegressor, DummyClassifier
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from category_encoders import TargetEncoder
 import lightgbm as lgb
+from lightgbm import LGBMClassifier, LGBMRegressor
 from statsmodels.stats.multitest import multipletests
 from scipy.special import expit
 from tqdm import tqdm
+import random
 
 def _get_n_repeats(n_instances: int) -> int:
     """
@@ -481,12 +483,12 @@ def local_and_distant_means(x: pd.Series, y: pd.Series, k=5,
     else:
         X_use = x
 
-    y_agg = y.groupby(X_use).mean()
+    y_agg = y.groupby(X_use, observed=False).mean()
 
     # If the no. of unique values is to high, the algorithm might take to long - we shrink to the shrink_u most frequent values
     if X_use.nunique()>shrink_u:
 
-        y_agg_c = y.groupby(X_use).count()
+        y_agg_c = y.groupby(X_use, observed=False).count()
         y_agg = y_agg.loc[y_agg_c.sort_values(ascending=False).iloc[:shrink_u].index].sort_index()
 
     n = len(y_agg)
@@ -594,8 +596,8 @@ def get_cat_stats(X, y, col, average_infrequent=0):
     stats["mean_abs_corr"] = float(X.corr()[col].drop(col).abs().mean())
     stats["max_abs_corr"] = float(X.corr()[col].drop(col).abs().max())
     stats["min_abs_corr"] = float(X.corr()[col].drop(col).abs().min())
-    stats["target_group_mean_stds"] = float(y.groupby(X[col]).mean().std()) # How different the target is for this feature across different values
-    stats["target_group_stds_mean"] = float(y.groupby(X[col]).std().mean()) # How different the target is for this feature inside a value
+    stats["target_group_mean_stds"] = float(y.groupby(X[col], observed=False).mean().std()) # How different the target is for this feature across different values
+    stats["target_group_stds_mean"] = float(y.groupby(X[col], observed=False).std().mean()) # How different the target is for this feature inside a value
     stats["ordinal"] = float(all(X[col]==X[col].round(0)))
     stats["unique"] = float(X[col].nunique())
     stats["min_unique_freq"] = float(X[col].value_counts().min())
@@ -702,7 +704,7 @@ def generate_category_report_pdf(X, y, save_path, dataset_name, show_corr_featur
                 ax.set_ylabel('Mean Difference ± Std Dev')
 
                 # Mean-per-value plots
-                means = y.groupby(X[col]).mean()
+                means = y.groupby(X[col], observed=False).mean()
                 axes[3].scatter(means.index, means.values)
                 axes[3].set_title(f'Mean of y grouped by {col}')
                 axes[3].set_xlabel(col)
@@ -717,7 +719,7 @@ def generate_category_report_pdf(X, y, save_path, dataset_name, show_corr_featur
                 axes[4].set_xlabel(col)
 
             else:
-                means = y.groupby(X[col]).mean()
+                means = y.groupby(X[col], observed=False).mean()
                 axes[2].scatter(means.index, means.values)
                 axes[2].set_title(f'Mean of y grouped by {col}')
                 axes[2].set_xlabel(col)
@@ -1150,7 +1152,8 @@ class TargetMeanRegressor(BaseEstimator, RegressorMixin):
 
         # compute per-category means
         df = pd.DataFrame({'feature': X_ser, 'target': y_arr})
-        self.mapping_ = df.groupby('feature')['target'].mean().to_dict()
+        self.mapping_ = df.groupby('feature', observed=False)['target'].mean().to_dict()
+        self.mapping_ = {k: v for k, v in self.mapping_.items() if pd.notna(v)}
         # global mean for unseen categories
         self.global_mean_ = y_arr.mean()
         return self
@@ -1165,7 +1168,7 @@ class TargetMeanRegressor(BaseEstimator, RegressorMixin):
             self.mapping_.get(val, self.global_mean_)
             for val in X_ser
         ]
-        return np.asarray(preds)
+        return preds
 
     def _to_series(self, X):
         if isinstance(X, pd.DataFrame):
@@ -1258,77 +1261,6 @@ class TargetMeanClassifier(ClassifierMixin, BaseEstimator):
         if arr.ndim != 1:
             raise ValueError("X must be 1-d or a single-column 2-d array/DataFrame")
         return arr
-
-
-# class TargetMeanClassifier(ClassifierMixin, BaseEstimator):
-#     """
-#     A classifier that learns, for each category in a single feature,
-#     the empirical class-probability vector.  Unseen categories
-#     fall back to the overall class distribution.
-#     """
-
-#     def __init__(self):
-#         _estimator_type = "classifier"
-
-#     def fit(self, X, y):
-#         """
-#         X : array-like or DataFrame, shape (n_samples, 1)
-#         y : array-like of labels shape (n_samples,)
-#         """
-#         X_ser = self._to_series(X)
-#         y_arr = np.asarray(y)
-#         # store distinct classes
-#         self.classes_, y_idx = np.unique(y_arr, return_inverse=True)
-#         n_classes = len(self.classes_)
-
-#         # build mapping: category → proba vector
-#         df = pd.DataFrame({'feature': X_ser, 'label': y_arr})
-#         self.mapping_ = {}
-#         # helper to map a label to its integer index
-#         label_to_idx = {c: i for i, c in enumerate(self.classes_)}
-#         for cat, grp in df.groupby('feature'):
-#             counts = np.bincount(
-#                 [label_to_idx[v] for v in grp['label']],
-#                 minlength=n_classes
-#             )
-#             self.mapping_[cat] = counts / counts.sum()
-
-#         # global distribution for unseen
-#         global_counts = np.bincount(y_idx, minlength=n_classes)
-#         self.global_proba_ = global_counts / global_counts.sum()
-#         return self
-
-#     def predict_proba(self, X):
-#         """
-#         returns array shape (n_samples, n_classes)
-#         """
-#         X_ser = self._to_series(X)
-#         proba = [
-#             self.mapping_.get(val, self.global_proba_)
-#             for val in X_ser
-#         ]
-#         return np.vstack(proba)
-
-#     def predict(self, X):
-#         """
-#         returns predicted class labels
-#         """
-#         proba = self.predict_proba(X)
-#         idx = np.argmax(proba, axis=1)
-#         return self.classes_[idx]
-
-#     def _to_series(self, X):
-#         # same helper as above
-#         if isinstance(X, pd.DataFrame):
-#             if X.shape[1] != 1:
-#                 raise ValueError("TargetMeanClassifier requires exactly one column")
-#             return X.iloc[:, 0]
-#         arr = np.asarray(X)
-#         if arr.ndim == 2 and arr.shape[1] == 1:
-#             arr = arr.ravel()
-#         if arr.ndim != 1:
-#             raise ValueError("X must be 1-d or a single-column 2-d array/DataFrame")
-#         return pd.Series(arr)
     
 
 class TargetMeanRegressorNN(TargetMeanRegressor):
@@ -1462,10 +1394,10 @@ class TargetMeanClassifier(ClassifierMixin, BaseEstimator):
     def fit(self, X, y):
         # 1) Seriesify and sentinelize NaNs
         X_ser = self._to_series(X)
-        X_filled = X_ser.where(X_ser.notna(), self._nan_sentinel)
+        # X_filled = X_ser.where(X_ser.notna(), self._nan_sentinel)
 
         # 2) factorize X into integer codes (0…n_categories-1)
-        codes, uniques = pd.factorize(X_filled, sort=False)
+        codes, uniques = pd.factorize(X_ser, sort=False)
         self.categories_ = list(uniques)
         n_categories = len(uniques)
 
@@ -1502,10 +1434,10 @@ class TargetMeanClassifier(ClassifierMixin, BaseEstimator):
 
     def predict_proba(self, X):
         X_ser = self._to_series(X)
-        X_filled = X_ser.where(X_ser.notna(), self._nan_sentinel)
+        # X_filled = X_ser.where(X_ser.notna(), self._nan_sentinel)
 
         # vectorized lookup: returns –1 for unseen categories
-        codes = self._categories_index.get_indexer(X_filled)
+        codes = self._categories_index.get_indexer(X_ser)
         # map all –1’s to the last row (global fallback)
         codes = np.where(codes < 0, self._fallback_idx, codes)
         # pull out the corresponding probability vectors
@@ -2393,11 +2325,21 @@ def analyze_feature_types(X, y, target_type='binary', early_stopping_rounds=20, 
         "significances": significances
     }
 
-def make_cv_scores_with_early_stopping(target_type, scorer, cv, early_stopping_rounds=20, 
+def make_cv_scores_with_early_stopping(target_type, n_folds=5, early_stopping_rounds=20, 
                                        vectorized=False, verbose=False,
-                                       groups=None
+                                       groups=None,
+                                       drop_modes=0,
                                        ):
     """CV creation function for vectorized versions of the TargetEncoderModels."""
+    if target_type=='binary':
+        scorer = roc_auc_score #lambda ytr, ypr: -log_loss(ytr, ypr) # roc_auc_score
+        cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    elif target_type=='regression':
+        scorer = lambda ytr, ypr: -root_mean_squared_error(ytr, ypr) # r2_score
+        cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+    else:   
+        raise ValueError("target_type must be 'binary' or 'regression'")
+    
     def cv_scores_with_early_stopping(X_df, y_s, pipeline):
         scores = []
         for train_idx, test_idx in cv.split(X_df, y_s, groups=groups):
@@ -2441,3 +2383,443 @@ def make_cv_scores_with_early_stopping(target_type, scorer, cv, early_stopping_r
 
 
 
+def drop_infrequent_values(series, thresh=1):
+    value_counts = series.value_counts()
+    non_unique_values = value_counts[value_counts > thresh].index
+    return series[series.isin(non_unique_values)]
+
+def drop_frequent_values(series, thresh=1):
+    value_counts = series.value_counts()
+    non_unique_values = value_counts[value_counts <= thresh].index
+    return series[series.isin(non_unique_values)]
+
+def drop_mode_values(series, thresh=1):
+    value_counts = series.value_counts()
+    mode_values = value_counts.index[thresh:]
+    return series[series.isin(mode_values)]
+
+class TargetMeanClassifierCut(TargetMeanClassifier):
+    def __init__(self, q_thresh=0):
+        super().__init__()
+        self.q_thresh = q_thresh
+
+    def fit(self, X, y):
+        X_use = X.iloc[:,0].copy()
+        self.c_map = dict(X_use.value_counts())
+        self.c_map = {k: k  if v > self.q_thresh else 'nan' for k, v in self.c_map.items()}  
+        X_use = X_use.map(self.c_map)
+        return super().fit(X_use.to_frame(), y)
+
+    def predict_proba(self, X):
+        X_use = X.iloc[:,0].copy()
+        X_use = X_use.map(self.c_map)
+        return super().predict_proba(X_use.to_frame())
+
+class TargetMeanRegressorCut(TargetMeanRegressor):
+    def __init__(self, q_thresh=0):
+        super().__init__()
+        self.q_thresh = q_thresh
+
+    def fit(self, X, y):
+        # TODO: Make sure that the category dtype of train and val matches
+        X_use = X.iloc[:,0].copy()
+        self.c_map = dict(X_use.value_counts())
+        self.c_map = {k: k  if v > self.q_thresh else 'nan' for k, v in self.c_map.items()}  
+        X_use = X_use.map(self.c_map)
+        return super().fit(X_use.to_frame(), y)
+
+    def predict(self, X):
+        X_use = X.iloc[:,0].copy()
+        X_use = X_use.map(self.c_map)
+        return super().predict(X_use.to_frame())
+
+
+class LightGBMClassifierCut(LGBMClassifier):
+    def __init__(self, q_thresh=0, init_kwargs: dict=dict()):
+        super().__init__(**init_kwargs)
+        self.verbose = init_kwargs.get("verbose", -1)
+        self.n_estimators = init_kwargs.get("n_estimators", 100)
+        self.max_bin = init_kwargs.get("max_bin", 255)
+        self.max_depth = init_kwargs.get("max_depth", 2)
+        self.random_state = init_kwargs.get("random_state", 42)
+        self.init_kwargs = None
+        self.q_thresh = q_thresh
+
+    def fit(self, X, y, **kwargs):
+        X_use = X.iloc[:,0].copy()
+        if X_use.dtype in ['object', 'category']:
+            fill = 'nan'
+        else:
+            fill = np.nan
+        self.c_map = dict(X_use.value_counts())
+        self.c_map = {k: k  if v > self.q_thresh else fill for k, v in self.c_map.items()}  # only keep those with more than 5 occurrences
+        X_use = X_use.map(self.c_map)
+        if X_use.dtype in ['object', 'category']:
+            X_use = X_use.astype('category')
+            self.dt = X_use.dtype 
+        return super().fit(X_use.to_frame(), y, **kwargs)
+    
+    def predict_proba(self, X, **kwargs):
+        X_use = X.iloc[:,0].copy()
+        X_use = X_use.map(self.c_map)
+        if X_use.dtype in ['object', 'category']:   
+            X_use = X_use.astype(self.dt)
+        return super().predict_proba(X_use.to_frame(), **kwargs)
+
+class LightGBMRegressorCut(LGBMRegressor):
+    def __init__(self, q_thresh=0, init_kwargs: dict=dict()):
+        super().__init__(**init_kwargs)
+        self.verbose = init_kwargs.get("verbose", -1)
+        self.n_estimators = init_kwargs.get("n_estimators", 100)
+        self.max_bin = init_kwargs.get("max_bin", 255)
+        self.max_depth = init_kwargs.get("max_depth", 2)
+        self.random_state = init_kwargs.get("random_state", 42)
+        self.init_kwargs = None
+        self.q_thresh = q_thresh
+
+    def fit(self, X, y, **kwargs):
+        X_use = X.iloc[:,0].copy()
+        if X_use.dtype in ['object', 'category']:
+            fill = 'nan'
+        else:
+            fill = np.nan
+        self.c_map = dict(X_use.value_counts())
+        self.c_map = {k: k  if v > self.q_thresh else fill for k, v in self.c_map.items()}  # only keep those with more than 5 occurrences
+        X_use = X_use.map(self.c_map)
+        if X_use.dtype in ['object', 'category']:
+            X_use = X_use.astype('category')
+            self.dt = X_use.dtype 
+        return super().fit(X_use.to_frame(), y, **kwargs)
+
+    def predict(self, X, **kwargs):
+        X_use = X.iloc[:,0].copy()
+        X_use = X_use.map(self.c_map)
+        if X_use.dtype in ['object', 'category']:   
+            X_use = X_use.astype(self.dt)
+        return super().predict(X_use.to_frame(), **kwargs)
+    
+def safe_stratified_group_kfold(X, y, groups, n_splits=5, max_attempts=1):
+    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    attempt = 0
+
+    while attempt < max_attempts:
+        for fold, (train_idx, test_idx) in enumerate(sgkf.split(X, y, groups)):
+            test_labels = y[test_idx]
+            class_counts = Counter(test_labels)
+            if len(class_counts) < 2:
+                break  # This fold has only one class
+        else:
+            return sgkf#.split(X, y, groups)  # All folds are good
+        
+        attempt += 1
+
+    print("Could not generate stratified group folds with both classes in all test sets.")
+    return None  # If we reach here, it means we couldn't find a valid split
+
+def grouped_interpolation_test(x,y, target_type, add_dummy=False):
+    q = int(x.nunique())
+    
+    if target_type == 'binary':
+        # cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+        cv = safe_stratified_group_kfold(x, y, x, n_splits=5)
+        if cv is None:
+            return None
+        cv_scores_with_early_stopping = make_cv_scores_with_early_stopping(
+            "binary", early_stopping_rounds=20, 
+            verbose=False, groups=x
+            )
+
+        lgb_model = LGBMClassifier(verbose=-1, n_estimators=q, random_state=42, max_bin=q, max_depth=2)
+    elif target_type == 'regression':
+        cv = GroupKFold(n_splits=5, shuffle=True, random_state=42)
+        cv_scores_with_early_stopping = make_cv_scores_with_early_stopping(
+            "regression", early_stopping_rounds=20, 
+            verbose=False, groups=x
+            )
+
+        lgb_model = LGBMRegressor(verbose=-1, n_estimators=q, random_state=42, max_bin=q, max_depth=2)
+
+
+    if add_dummy:
+        pipe = Pipeline([("model", DummyRegressor())])
+        res = cv_scores_with_early_stopping(x.to_frame(), y, pipe)
+        print(f"Dummy: {np.mean(res):.4f} (+/- {np.std(res):.4f})")    
+
+    pipe = Pipeline([("model", lgb_model)])
+    res = cv_scores_with_early_stopping(x.astype(float).to_frame(), y, pipe)
+    print(f"Performance: {np.mean(res):.4f} (+/- {np.std(res):.4f})")    
+    return res
+
+
+def analyze_cat_feature(x,y):
+    # Insight: histograms look different depending on whether we treat a feature as string or float - could somehow use this information
+    fig,ax = plt.subplots(1,4, figsize=(10, 5))
+    ax[0].scatter(x, y)
+
+    y_by_x = y.groupby(x, observed=False).mean()
+    ax[1].scatter(y_by_x.index, y_by_x.values)
+
+    ax[2].hist(x, bins=100)
+    pd.Series(x.astype(float).sort_values()).plot(kind='hist', bins=100, ax=ax[3])
+
+def get_feature_stats(x, y, target_type='binary', verbose=True):
+    q = int(x.nunique())
+    lgb_base_params = {
+        "verbose": -1, "n_estimators": q*10, "random_state": 42, "max_bin": q, 
+        "max_depth": 2, "min_samples_leaf": 1, "min_child_samples": 1,
+    }
+    stats = {}
+    stats['q'] = q
+    if target_type == 'binary':
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        cv_scores_with_early_stopping = make_cv_scores_with_early_stopping(
+            "binary", roc_auc_score, cv, early_stopping_rounds=20, 
+            verbose=False
+            )
+
+        lgb_class = lambda lgb_params: LGBMClassifier(**lgb_params)
+        target_model = TargetMeanClassifier()
+        target_cut_model = lambda t: TargetMeanClassifierCut(q_thresh=t)
+        lgb_cut_model = lambda t, p: LightGBMClassifierCut(q_thresh=t, init_kwargs=p)
+    elif target_type == 'regression':
+        cv = KFold(n_splits=5, shuffle=True, random_state=42)
+        cv_scores_with_early_stopping = make_cv_scores_with_early_stopping(
+            "regression", root_mean_squared_error, cv, early_stopping_rounds=20, 
+            verbose=False
+            )
+
+        lgb_class = lambda lgb_params: LGBMRegressor(**lgb_params)
+        target_model = TargetMeanRegressor()
+        target_cut_model = lambda t: TargetMeanRegressorCut(q_thresh=t)
+        lgb_cut_model = lambda t, p: LightGBMRegressorCut(q_thresh=t, init_kwargs=p)
+    else:
+        raise ValueError("Unsupported target type. Use 'binary' or 'regression'.")
+
+
+    infreq = x.value_counts().sort_values(ascending=True).unique()[:100]
+
+    # Target-based stats
+    pipe = Pipeline([("model", target_model)])
+    stats['mean'] = cv_scores_with_early_stopping(x.astype('category').to_frame(), y, pipe)
+    for t in infreq:
+        t = int(t)
+
+        pipe = Pipeline([("model", target_cut_model(t))])
+        stats[f'mean-u>{t}'] = cv_scores_with_early_stopping(x.astype('category'), y, pipe)
+
+        pipe = Pipeline([("model", target_model)])
+        x_use = drop_infrequent_values(x,t)
+        y_use = y.loc[x_use.index]
+        stats[f'mean-drop-u<={t}'] = cv_scores_with_early_stopping(x_use.astype('category'), y_use, pipe)
+
+        try:
+            pipe = Pipeline([("model", target_model)])
+            x_use = drop_frequent_values(x,t)
+            y_use = y.loc[x_use.index]
+            stats[f'mean-drop-u>{t}'] = cv_scores_with_early_stopping(x_use.astype('category'), y_use, pipe)
+        except:
+            continue
+    # LGB-based stats
+    pipe = Pipeline([("model", lgb_class(lgb_base_params))])
+    stats['lgb-num'] = cv_scores_with_early_stopping(x.astype(float).to_frame(), y, pipe)
+    pipe = Pipeline([("model", lgb_class(lgb_base_params))])
+    stats['lgb-cat'] = cv_scores_with_early_stopping(x.astype('category').to_frame(), y, pipe)
+    for t in infreq:
+        t = int(t)
+        pipe = Pipeline([("model", lgb_cut_model(t, lgb_base_params))])
+        stats[f'lgb-num-u>{t}'] = cv_scores_with_early_stopping(x.astype(float).to_frame(), y, pipe)
+
+        pipe = Pipeline([("model", lgb_cut_model(t, lgb_base_params))])
+        stats[f'lgb-cat-u>{t}'] = cv_scores_with_early_stopping(x.astype('category').to_frame(), y, pipe)
+
+    # pipe = Pipeline([("model", LightGBMClassifierCut(q_thresh=1, init_kwargs=lgb_base_params))])
+    # stats['lgb-num-u>1'] = cv_scores_with_early_stopping(x.astype(float).to_frame(), y, pipe)
+    # pipe = Pipeline([("model", LightGBMClassifierCut(q_thresh=2, init_kwargs=lgb_base_params))])
+    # stats['lgb-num-u>2'] = cv_scores_with_early_stopping(x.astype(float).to_frame(), y, pipe)
+
+    # pipe = Pipeline([("model", LightGBMClassifierCut(q_thresh=1, init_kwargs=lgb_base_params))])
+    # stats['lgb-cat-u>1'] = cv_scores_with_early_stopping(x.astype('category').to_frame(), y, pipe)
+    # pipe = Pipeline([("model", LightGBMClassifierCut(q_thresh=2, init_kwargs=lgb_base_params))])
+    # stats['lgb-cat-u>2'] = cv_scores_with_early_stopping(x.astype('category').to_frame(), y, pipe)
+
+    # for n_est in [int(q/2),int(q/4), int(q/8)]:
+    #     p = lgb_base_params.copy()
+    #     p["n_estimators"] = n_est
+    #     pipe = Pipeline([("model", lgb_class(p))])
+    #     stats[f'lgb-{n_est}est-num'] = cv_scores_with_early_stopping(x.astype(float).to_frame(), y, pipe)
+    #     pipe = Pipeline([("model", lgb_class(p))])
+    #     stats[f'lgb-{n_est}est-cat'] = cv_scores_with_early_stopping(x.astype('category').to_frame(), y, pipe)
+
+    if q>16:
+        for m_bin in [int(q/2),int(q/4), int(q/8), int(q/16)]:
+            # Cat features not affected 
+            p = lgb_base_params.copy()
+            p["max_bin"] = m_bin
+            pipe = Pipeline([("model", lgb_class(p))])
+            stats[f'lgb-{m_bin}bins-num'] = cv_scores_with_early_stopping(x.astype(float).to_frame(), y, pipe)
+
+
+    # p = lgb_base_params.copy()
+    # p["max_depth"] = 1
+    # pipe = Pipeline([("model", lgb_class(p))])
+    # stats['lgb-d1-cat'] = cv_scores_with_early_stopping(x.astype('category').to_frame(), y, pipe)
+    # pipe = Pipeline([("model", LightGBMClassifierCut(q_thresh=1, init_kwargs=p))])
+    # stats['lgb-d1-cat-u>1'] = cv_scores_with_early_stopping(x.astype('category').to_frame(), y, pipe)
+    # pipe = Pipeline([("model", LightGBMClassifierCut(q_thresh=2, init_kwargs=p))])
+    # stats['lgb-d1-cat-u>2'] = cv_scores_with_early_stopping(x.astype('category').to_frame(), y, pipe)
+
+
+    if verbose:
+        print(f"Feature: {x.name}")
+        for key, value in stats.items():
+            if key in ['q']:
+                print(f"{key}: {value}")
+            else:
+                print(f"{key}: {np.mean(value):.4f} (+/- {np.std(value):.4f})")
+
+    return stats
+
+
+class LightGBMBinner(BaseEstimator, TransformerMixin):
+    """
+    Hybrid LightGBM‐style binning:
+      1) Try quantile‐sketch with linear interpolation.
+      2) If that yields NaN or <=1 cut, fallback to uniform slicing of unique values.
+    Guarantees up to max_bin bins for any continuous feature.
+    """
+    def __init__(self, max_bin=255, subsample_for_bin=200000):
+        self.max_bin = max_bin
+        self.subsample_for_bin = subsample_for_bin
+        self.bin_thresholds_ = None
+        self.feature_names_in_ = None
+
+    def fit(self, X, y=None):
+        X = np.asarray(X)
+        n_samples, n_features = X.shape
+        # capture feature names if DataFrame
+        self.feature_names_in_ = (
+            getattr(X, "columns", None)
+            if hasattr(X, "columns")
+            else [f"f{i}" for i in range(n_features)]
+        )
+        thresholds = []
+        for j in range(n_features):
+            col = X[:, j]
+            # 1) quantile‐sketch
+            #   subsample if needed
+            if n_samples > self.subsample_for_bin:
+                idx = np.random.choice(n_samples, self.subsample_for_bin, replace=False)
+                col_s = np.sort(col[idx])
+            else:
+                col_s = np.sort(col)
+            # compute interior quantiles with linear interpolation
+            qs = np.linspace(0, 1, self.max_bin + 1)[1:-1]
+            cuts = np.quantile(col_s, qs, method="linear")
+            cuts = np.unique(cuts[~np.isnan(cuts)])
+            # 2) fallback if bad
+            if len(cuts) <= 1:
+                uni = np.unique(col)
+                m = len(uni)
+                if m <= self.max_bin:
+                    cuts = uni
+                else:
+                    # pick evenly‐spaced unique indices
+                    idx2 = np.linspace(1, m - 1, self.max_bin + 1, dtype=int)[1:-1]
+                    cuts = uni[idx2]
+            thresholds.append(cuts.tolist())
+        self.bin_thresholds_ = thresholds
+        return self
+
+    def transform(self, X):
+        if self.bin_thresholds_ is None:
+            raise RuntimeError("Must fit before transform")
+        X = np.asarray(X)
+        B = np.zeros_like(X, dtype=int)
+        for j, thr in enumerate(self.bin_thresholds_):
+            B[:, j] = np.digitize(X[:, j], thr, right=True)
+        return B
+
+    def get_feature_names_out(self, input_features=None):
+        return np.array(self.feature_names_in_, dtype=object)
+
+import numpy as np
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.cluster import MiniBatchKMeans
+
+class KMeansBinner(BaseEstimator, TransformerMixin):
+    """
+    1D k-means–based binning:
+      - For each feature, cluster its (subsampled) values into up to max_bin clusters.
+      - Sort the cluster centers, then place thresholds at midpoints between them.
+      - Transform by np.digitize against those thresholds.
+
+    Buckets will not be equal‐frequency, but they will adapt to your data's density.
+    """
+    def __init__(self, max_bin=255, subsample_for_bin=100000, random_state=None):
+        self.max_bin = max_bin
+        self.subsample_for_bin = subsample_for_bin
+        self.random_state = random_state
+        self.bin_thresholds_ = None
+        self.feature_names_in_ = None
+
+    def fit(self, X, y=None):
+        X = np.asarray(X)
+        n_samples, n_features = X.shape
+
+        # capture feature names if DataFrame, else generic
+        self.feature_names_in_ = (
+            getattr(X, "columns", None)
+            if hasattr(X, "columns")
+            else [f"f{i}" for i in range(n_features)]
+        )
+
+        thresh_list = []
+        for j in range(n_features):
+            col = X[:, j]
+
+            # subsample for clustering
+            if n_samples > self.subsample_for_bin:
+                idx = np.random.RandomState(self.random_state).choice(
+                    n_samples, self.subsample_for_bin, replace=False
+                )
+                sample = col[idx].reshape(-1, 1)
+            else:
+                sample = col.reshape(-1, 1)
+
+            # decide k = min(max_bin, unique_count)
+            unique_vals = np.unique(sample.ravel())
+            n_clusters = min(self.max_bin, unique_vals.shape[0])
+
+            # fit 1D k-means
+            km = MiniBatchKMeans(n_clusters=n_clusters,
+                                 random_state=self.random_state)
+            km.fit(sample)
+            centers = np.sort(km.cluster_centers_.ravel())
+
+            # thresholds = midpoints between sorted centers
+            mids = (centers[:-1] + centers[1:]) / 2.0
+            thresh_list.append(mids.tolist())
+
+        self.bin_thresholds_ = thresh_list
+        return self
+
+    def transform(self, X):
+        if self.bin_thresholds_ is None:
+            raise RuntimeError("Must fit before calling transform()")
+        X = np.asarray(X)
+        n_samples, n_features = X.shape
+        Xb = np.zeros_like(X, dtype=int)
+
+        for j, thr in enumerate(self.bin_thresholds_):
+            Xb[:, j] = np.digitize(X[:, j], thr, right=True)
+
+        return Xb
+
+    def get_feature_names_out(self, input_features=None):
+        return np.array(self.feature_names_in_, dtype=object)
+    
+def sample_from_set(my_set, num_samples):
+    if num_samples > len(my_set):
+        raise ValueError("Number of samples requested exceeds the size of the set")
+    my_list = list(my_set)
+    return random.sample(my_list, num_samples)
