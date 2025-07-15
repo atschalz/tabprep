@@ -1,32 +1,18 @@
-import pickle
 import pandas as pd
 import numpy as np
-from sklearn.base import BaseEstimator, TransformerMixin
 import lightgbm as lgb
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, PowerTransformer, QuantileTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.dummy import DummyClassifier, DummyRegressor
-from sklearn.model_selection import StratifiedKFold, KFold
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import roc_auc_score, r2_score, root_mean_squared_error, log_loss
-from utils import TargetMeanClassifier,TargetMeanRegressor,UnivariateLinearRegressor,UnivariateLogisticClassifier,PolynomialLogisticClassifier,PolynomialRegressor, p_value_wilcoxon_greater_than_zero, clean_series, UnivariateThresholdClassifier, MultiFeatureTargetMeanClassifier, MultiFeatureUnivariateLogisticClassifier, make_cv_scores_with_early_stopping, LightGBMBinner, p_value_sign_test_median_greater_than_zero
-from sklearn.linear_model import LogisticRegression
-import os
+from proxy_models import TargetMeanClassifier, TargetMeanRegressor, UnivariateLinearRegressor, UnivariateLogisticClassifier, PolynomialLogisticClassifier, PolynomialRegressor, UnivariateThresholdClassifier, MultiFeatureTargetMeanClassifier, MultiFeatureUnivariateLogisticClassifier, LightGBMBinner, KMeansBinner
+from utils import p_value_wilcoxon_greater_than_zero, clean_feature_names, clean_series, make_cv_function, p_value_sign_test_median_greater_than_zero, p_value_ttest_greater_than_zero
 import time
 from category_encoders import LeaveOneOutEncoder
+from base_preprocessor import BasePreprocessor
 
-
-def clean_feature_names(X_input: pd.DataFrame):
-    X = X_input.copy()
-    X.columns = [str(col).replace('[', '').replace(']', '').replace(':', '')
-                                            .replace('<', '').replace('>', '')
-                                            .replace('=', '').replace(',', '')
-                                            .replace(' ', '_') for col in X.columns]
-    
-    return X
-
-
-class FeatureTypeDetector(TransformerMixin, BaseEstimator):
+class FeatureTypeDetector(BasePreprocessor):
     def __init__(self, target_type, 
                 tests_to_run=[
                 'dummy_mean',
@@ -41,13 +27,14 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                 # Global hyperparameters for each test
                 min_q_as_num=6, 
                 n_folds=5, 
-                alpha=0.05,
-                significance_method='wilcoxon', # ['t-test', 'wilcoxon', 'median]
+                alpha=0.1,
+                significance_method='wilcoxon', # ['ttest', 'wilcoxon', 'median]
                 verbose=True,
                 assign_numeric=False, 
 
                 # Trivial feature test hyperparameters
                 detect_numeric_in_string=False, 
+                # TODO: Add a hyperparameter to optionally reassess convertible categoricals
 
                 # Interpolation test hyperparameters
                 max_degree=3, # max degree of polynomial interpolation
@@ -56,35 +43,35 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                 # Combination test hyperparameters
                 combination_criterion='win',
                 combination_test_min_bins=16,
-                combination_test_max_bins=2048,
+                combination_test_max_bins=2048, #TODO: Test with 90% of unique values as max
                 assign_numeric_with_combination=False,
                 binning_strategy='lgb', # ['lgb', 'KMeans', 'DT']
 
+                # Multivariate performance test hyperparameters
+                mvp_use_data='all', # ['all', 'numeric'] - if 'all', use all columns, if 'numeric', use only numeric columns
+                mvp_criterion='significance', # ['significance', 'average'] - if 'significance', use p-value, else just the average score
+                mvp_max_cols_use=100, # Maximum number of columns to use in the multivariate performance test
                 # Mode test hyperparameters
                 max_modes=5,
 
                 # Interaction test hyperparameters
-                interaction_mode='high_corr', # ['high_corr', 'all' int]
+                interaction_mode='random', # ['high_corr', 'all' int]
+                n_interaction_candidates=1, # Number of interaction candidates to be generated per feature
 
                  # Performance test hyperparameters
                  lgb_model_type="unique-based-binned", 
                  fit_cat_models=True,
 
-                 use_performance_test=False,
-                 use_interaction_test=True,
-                 use_leave_one_out_test=False,
-                 
                  # experimental
-                 use_highest_corr_feature=False, num_corr_feats_use=0,
                  drop_modes=0,
                  drop_unique=False,
                  ):
-        # TODO: Adjust print statements to look nicer
+        # NOTE: Idea: Reinvent interaction test by first categorizing a dataset into 1) there are already clear categorical features; 2) there are only numerical features; 3) there are only numerical features, but many categorical candidates. And based on that use different interaction tests.
+        # TODO: Make sure that everything is deterministic given a fixed seed
+        super().__init__(target_type=target_type, n_folds=n_folds, alpha=alpha, significance_method=significance_method, mvp_criterion=mvp_criterion, mvp_max_cols_use=mvp_max_cols_use, verbose=verbose)
         # Parameters
-        self.target_type = 'binary' if target_type == 'multiclass' else target_type
         self.tests_to_run = tests_to_run
         self.min_q_as_num = min_q_as_num
-        self.n_folds = n_folds
         self.lgb_model_type = lgb_model_type
         self.max_degree = max_degree
         self.max_modes = max_modes
@@ -92,38 +79,25 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         self.assign_numeric = assign_numeric
         self.assign_numeric_with_combination = assign_numeric_with_combination
         self.detect_numeric_in_string = detect_numeric_in_string
-        self.use_highest_corr_feature = use_highest_corr_feature
-        self.num_corr_feats_use = num_corr_feats_use
         self.fit_cat_models = fit_cat_models
-        self.use_performance_test = use_performance_test
         self.combination_test_min_bins = combination_test_min_bins
         self.combination_test_max_bins = combination_test_max_bins
         self.binning_strategy = binning_strategy
         self.combination_criterion = combination_criterion
         self.drop_unique = drop_unique
-        self.alpha = alpha
         self.interaction_mode = interaction_mode
-        self.use_interaction_test = use_interaction_test
-        self.use_leave_one_out_test = use_leave_one_out_test
+        self.mvp_use_data = mvp_use_data
+        # self.mvp_criterion = mvp_criterion
+        # self.mvp_max_cols_use = mvp_max_cols_use
+        self.n_interaction_candidates = n_interaction_candidates
         self.drop_modes = drop_modes
-        self.significance_method = significance_method
-        self.verbose = verbose
 
         # Currently dummy-mean test is necessary as all other tests build on it
         if 'dummy_mean' not in self.tests_to_run:
             self.tests_to_run.insert(0, 'dummy_mean')
 
         # Functions
-        self.cv_scores_with_early_stopping = make_cv_scores_with_early_stopping(target_type=self.target_type, early_stopping_rounds=20, vectorized=False, drop_modes=self.drop_modes)
-        self.cv_scores_with_early_stopping_vec = make_cv_scores_with_early_stopping(target_type=self.target_type, early_stopping_rounds=20, vectorized=True, drop_modes=self.drop_modes)
-        if self.significance_method == 'wilcoxon':
-            self.significance_test = p_value_wilcoxon_greater_than_zero
-        elif self.significance_method == 't-test':
-            from scipy.stats import ttest_rel
-            self.significance_test = lambda x,y: ttest_rel(x, y).pvalue
-        elif self.significance_method == 'median':
-            from scipy.stats import median_test
-            self.significance_test = p_value_sign_test_median_greater_than_zero
+        self.cv_func = make_cv_function(target_type=self.target_type, early_stopping_rounds=20, vectorized=False, drop_modes=self.drop_modes)
 
         # Output variables
         self.orig_dtypes = {}
@@ -131,16 +105,8 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         self.col_names = []
         self.reassigned_features = []
         self.cat_dtype_maps = {}
-        self.scores = {}
-        self.significances = {}
-        self.removed_after_test = {}
-        # TODO: Fix multi-class behavior
-        # TODO: Think again whether the current proxy model really is the best choice (Might use a small NN instead of LGBM; Might use different HPs )
-        # TODO: Implement the parallelization speedup for all interpolation tests 
-        # TODO: Track how many features have been filtered by which step (mainly needs adding this for interpolation and combination tests)
+        self.removed_after_tests = {}
         # TODO: Implement option to drop duplicates
-        # TODO: Separate repetitive functions like the interpolation test into a separate function
-        # TODO: Add option to add an additional categorical feature instead of reassigning the feature type
         # TODO: Add option to treat low-cardinality features as categorical
 
     def handle_trivial_features(self, X_input: pd.DataFrame, verbose=False):
@@ -210,39 +176,20 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         
         return numeric_cand_cols
 
-
     def get_dummy_mean_scores(self, X, y):
         X_use = X.copy()
-        ### Get dummy and target mean scores
+        super().get_dummy_mean_scores(X_use, y)
         irrelevant_cols = []
-        for cnum, col in enumerate(X_use.columns):            
-            x_use = X_use[col].copy()
-            self.scores[col] = {}
-            self.significances[col] = {}
-            if self.verbose:
-                print(f"\rDummy and target mean test: {cnum+1}/{len(X_use.columns)} columns processed", end="", flush=True)
-            self.significances[col] = {}
-
-            # dummy baseline on single column
-            dummy_pipe = Pipeline([("model", DummyRegressor(strategy='mean') if self.target_type=="regression" else DummyClassifier(strategy='prior'))])
-            self.scores[col]["dummy"] = self.cv_scores_with_early_stopping(x_use.to_frame(), y, dummy_pipe)
-            
-            model = (TargetMeanClassifier() if self.target_type=="binary"
-                    else TargetMeanRegressor())
-            pipe = Pipeline([("model", model)])
-            self.scores[col]["mean"] = self.cv_scores_with_early_stopping(x_use.astype('category').to_frame(), y, pipe)
-
-            # TODO: Consider adding unpredictive mean test - if the mean is not predictive at all, there is no categorical feature (Might as well be a bad idea as features might be uncorrelated to the target while still affecting other features effect on the target)
-            self.significances[col]["test_irrelevant_mean"] = self.significance_test(
-                self.scores[col]["mean"] - self.scores[col]["dummy"]
-            )
-            # TODO: Check what would be the right testing condition (something like "if mean not significantly better than dummy, then we can assume the feature is irrelevant")
+        for col in X_use.columns:
             if self.significances[col]["test_irrelevant_mean"]>self.alpha: #'mean equal or worse than dummy'
                 self.dtypes[col] = "irrelevant"
                 irrelevant_cols.append(col)
+        
+        if self.verbose:
+            print(f"\r{len(irrelevant_cols)}/{len(X_use.columns)} columns are numeric acc. to dummy_mean test.")
 
         return [col for col in X_use.columns if col not in irrelevant_cols]
-
+    
     def single_interpolation_test(
             self,
             x, y, 
@@ -268,7 +215,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             ("model", interpol_model)
         ])
 
-        return self.cv_scores_with_early_stopping(x.to_frame(), y, pipe)
+        return self.cv_func(x.to_frame(), y, pipe)
 
     def interpolation_test(self, X, y, max_degree=3, assign_dtypes=True):
         X_use = X.copy()
@@ -311,7 +258,6 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                          self.scores[col]["mean"] - self.scores[col][interpolation_method]
                     )
 
-                # TODO: Consider adding a hyperparameter to accept a feature as numeric if linear matches the mean performance - in this case the pattern is so simple, that we don't need the complexity of treating a feature as categorical
                 if self.interpolation_criterion == "win":
                     if self.significances[col][f"test_{interpolation_method}_superior"]<self.alpha:
                         if assign_dtypes:
@@ -324,8 +270,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                         interpol_cols.append(col)
 
             if self.verbose:
-                print("\n")
-                print(f"{len(interpol_cols)}/{len(remaining_cols)} columns are numeric acc. to {interpolation_method} interpolation test.")
+                print(f"\r{len(interpol_cols)}/{len(remaining_cols)} columns are numeric acc. to {interpolation_method} interpolation test.")
 
             remaining_cols = [x for x in remaining_cols if x not in interpol_cols]
 
@@ -365,7 +310,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         else:
             raise ValueError(f"Unsupported binning strategy: {self.binning_strategy}. Use 'lgb', 'KMeans' or 'DT'.")            
 
-        return self.cv_scores_with_early_stopping(x.to_frame(), y, pipe)
+        return self.cv_func(x.to_frame(), y, pipe)
     
     def combination_test(self, X, y, max_binning_configs=3, early_stopping=True, assign_dtypes = True, verbose=False):
         '''
@@ -422,8 +367,8 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
 
 
             if verbose:
-                print("\n")
-                print(f"{len(comb_cols)}/{len(remaining_cols)} columns are numeric acc. to combination test with {m_bin} bins.")
+                print(f"\r{len(comb_cols)}/{len(remaining_cols)} columns are numeric acc. to combination test with {m_bin} bins.")
+
 
             remaining_cols = [x for x in remaining_cols if x not in comb_cols]
 
@@ -478,7 +423,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
 
             model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
             pipe = Pipeline([("model", model)])
-            self.scores[col]["lgb"] = self.cv_scores_with_early_stopping(clean_feature_names(x_use), y, pipe)
+            self.scores[col]["lgb"] = self.cv_func(clean_feature_names(x_use), y, pipe)
 
             self.significances[col]["test_lgb_superior"] = self.significance_test(
                 self.scores[col]["lgb"] - self.scores[col]["mean"]
@@ -500,7 +445,7 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             if self.fit_cat_models:
                 model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
                 pipe = Pipeline([("model", model)])
-                self.scores[col]["lgb-cat"] = self.cv_scores_with_early_stopping(clean_feature_names(x_use).astype("category"), y, pipe)
+                self.scores[col]["lgb-cat"] = self.cv_func(clean_feature_names(x_use).astype("category"), y, pipe)
 
                 self.significances[col]["test_lgb-ascat_superior"] = self.significance_test(
                     self.scores[col]["lgb-cat"] - self.scores[col]["lgb"]
@@ -546,7 +491,9 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             dummy_pred = dummy.fit(X[[col]], y).predict(X[[col]])
             dummy_score = metric(y, dummy_pred)
 
+            # TODO: Add significance test for LOO test
             loo_pred = LeaveOneOutEncoder().fit_transform(X[col].astype('category'), y)[col]
+            # TODO: Check whether the values are correctly matched for binary targets
             self.loo_scores[col] = metric(y, loo_pred)
 
             if self.loo_scores[col] < dummy_score:
@@ -554,75 +501,165 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                 loo_cols.append(col)
 
         if self.verbose:
-            print("\n")
-            print(f"{len(loo_cols)}/{len(X.columns)} columns are numeric acc. to Leave-One-Out test.")
+            print(f"\r{len(loo_cols)}/{len(X.columns)} columns are numeric acc. to Leave-One-Out test.")
 
         remaining_cols = [x for x in X.columns if x not in loo_cols]
 
         return remaining_cols
     
-    def interaction_test(self, X_cand, y, X_full):
-        '''Three aspects matter:
+    def get_interaction_candidates_bottomup(self, 
+                                        x, X_num, y, 
+                                        col_method='random', # ['random', 'target_corr', 'feature_corr']
+                                        interaction_method='random', # ['random', 'correlation']
+                                        n_candidates=1, replace=False,
+                                        seed=42
+                                        ):
+        np.random.seed(seed)
+        if col_method == 'random':
+            cols_to_use = np.random.choice(X_num.columns, np.min([len(X_num.columns),n_candidates]), replace=replace)
+        elif col_method == 'target_corr':
+            cols_to_use = X_num.corrwith(y).abs().sort_values(ascending=False).index[:n_candidates]
+        elif col_method == 'feature_corr':
+            cols_to_use = X_num.corrwith(x).abs().sort_values(ascending=False).index[:n_candidates]
+        else:
+            raise ValueError(f"Unknown col_method: {col_method}")
+
+        X_int = pd.DataFrame()
+        if interaction_method == 'random':
+            interactions = np.random.choice(["x","/","+","-"], np.min([len(X_num.columns),n_candidates]), replace=True)
+            for col, interaction in zip(cols_to_use, interactions):
+                if interaction == "/":
+                    X_int[f"{x.name}_{interaction}_{col}"] = (x / X_num[col].replace(0, np.nan)).values
+                elif interaction == "x":
+                    X_int[f"{x.name}_{interaction}_{col}"] = (x * X_num[col]).values
+                elif interaction == "-":
+                    X_int[f"{x.name}_{interaction}_{col}"] = (x - X_num[col]).values
+                elif interaction == "+":
+                    X_int[f"{x.name}_{interaction}_{col}"] = (x + X_num[col]).values
+        elif interaction_method == 'correlation':
+            X_int = pd.DataFrame(
+                index=X_num.index, 
+                columns=[f"{x.name}_/_{col2}" for col2 in cols_to_use]+ \
+                [f"{x.name}_x_{col2}" for col2 in cols_to_use]+ \
+                [f"{x.name}_-_{col2}" for col2 in cols_to_use]+ \
+                [f"{x.name}_+_{col2}" for col2 in cols_to_use]
+            )
+            X_int[[f"{x.name}_/_{col2}" for col2 in cols_to_use]] = (pd.concat([x]*len(cols_to_use),axis=1) / X_num[cols_to_use].replace(0, np.nan).values).values
+            X_int[[f"{x.name}_x_{col2}" for col2 in cols_to_use]] = (pd.concat([x]*len(cols_to_use),axis=1) * X_num[cols_to_use].values).values
+            X_int[[f"{x.name}_-_{col2}" for col2 in cols_to_use]] = (pd.concat([x]*len(cols_to_use),axis=1) - X_num[cols_to_use].values).values
+            X_int[[f"{x.name}_+_{col2}" for col2 in cols_to_use]] = (pd.concat([x]*len(cols_to_use),axis=1) + X_num[cols_to_use].values).values
+
+            # Filter weird cases
+            X_int = X_int.loc[:, X_int.nunique()>2] 
+
+            cors = X_int.corrwith(y, method='spearman').abs()
+            final_cols = [cors[[interaction for interaction in cors.index if col in interaction]].idxmax() for col in cols_to_use]
+
+            X_int = X_int[final_cols]
+        else:
+            raise ValueError(f"Unknown interaction_method: {interaction_method}")
+        
+        return X_int
+
+    def get_interaction_candidates_full(self, 
+                                        x, X_num, y, 
+                                        method='target_corr', # ['target_corr', 'corr_improve_over_base']
+                                        n_candidates=1, 
+                                        seed=42
+                                        ):
+        np.random.seed(seed)
+        ### 1. Get Interactions
+        cols_to_use = [c for c in X_num.columns if c != x.name]
+        
+        X_int = pd.DataFrame(
+            index=X_num.index, 
+            columns=[f"{x.name}_/_{col2}" for col2 in cols_to_use]+ \
+            [f"{x.name}_x_{col2}" for col2 in cols_to_use]+ \
+            [f"{x.name}_-_{col2}" for col2 in cols_to_use]+ \
+            [f"{x.name}_+_{col2}" for col2 in cols_to_use]
+        )
+        
+        # TODO: Think about whether reversing - and / makes sense
+        # TODO: Think about whether setting nans for division by zero is appropriate
+        X_int[[f"{x.name}_/_{col2}" for col2 in cols_to_use]] = (pd.concat([x]*len(cols_to_use),axis=1) / X_num[cols_to_use].replace(0, np.nan).values).values
+        X_int[[f"{x.name}_x_{col2}" for col2 in cols_to_use]] = (pd.concat([x]*len(cols_to_use),axis=1) * X_num[cols_to_use].values).values
+        X_int[[f"{x.name}_-_{col2}" for col2 in cols_to_use]] = (pd.concat([x]*len(cols_to_use),axis=1) - X_num[cols_to_use].values).values
+        X_int[[f"{x.name}_+_{col2}" for col2 in cols_to_use]] = (pd.concat([x]*len(cols_to_use),axis=1) + X_num[cols_to_use].values).values
+
+        # Filter weird cases
+        X_int = X_int.loc[:, X_int.nunique()>2]
+        
+        corr_X_int = X_int.corrwith(y, method='spearman').abs().sort_values(ascending=False)
+
+        if method == 'target_corr':
+            candidate_cols = corr_X_int.index[:n_candidates].tolist()
+        # EXPERIMENTAL;DOESNT WORK CURRENTLY
+        # elif method == 'corr_improve_over_base':
+        #     base_cors = X_num.corrwith(y).abs()
+        #     int_cors = corr_X_int.to_frame()
+        #     int_cors_diff = int_cors.apply(lambda x: float([x-base_cors.loc[x.name.split(f"_{i}_")].max() for i in ['+', '-', '/', 'x'] if len(x.name.split(f"_{i}_"))>1][0][0]),axis=1)
+        #     candidate_cols = int_cors_diff.sort_values(ascending=False).index[:1].tolist()
+        else:
+            raise ValueError(f"Unknown method: {method}. Use 'target_corr' or 'corr_improve_over_base'.")
+        
+        return X_int[candidate_cols]
+
+    def get_interaction_candidates(self, x, X_num, y, interaction_mode='random', n_interaction_candidates=1):
+        if interaction_mode=='full':
+            X_int = self.get_interaction_candidates_full(x, X_num, y, method='target_corr', n_candidates=n_interaction_candidates)
+        elif interaction_mode=='random':
+            X_int = self.get_interaction_candidates_bottomup(x, X_num, y,
+                                                        col_method='random', interaction_method='random',
+                                                        n_candidates=n_interaction_candidates, replace=False)
+        elif interaction_mode=='target':
+            X_int = self.get_interaction_candidates_bottomup(x, X_num, y,
+                                                        col_method='target_corr', interaction_method='random',
+                                                        n_candidates=n_interaction_candidates, replace=False)
+        elif interaction_mode=='feature':
+            X_int = self.get_interaction_candidates_bottomup(x, X_num, y,
+                                                        col_method='feature_corr', interaction_method='random',
+                                                        n_candidates=n_interaction_candidates, replace=False)
+        elif interaction_mode=='random-best':
+            X_int = self.get_interaction_candidates_bottomup(x, X_num, y,
+                                                        col_method='random', interaction_method='correlation',
+                                                        n_candidates=n_interaction_candidates, replace=False)
+        elif interaction_mode=='target-best':
+            X_int = self.get_interaction_candidates_bottomup(x, X_num, y,
+                                                        col_method='target_corr', interaction_method='correlation',
+                                                        n_candidates=n_interaction_candidates, replace=False)
+        elif interaction_mode=='feature-best':
+            X_int = self.get_interaction_candidates_bottomup(x, X_num, y,
+                                                        col_method='feature_corr', interaction_method='correlation',
+                                                        n_candidates=n_interaction_candidates, replace=False)
+        else:
+            raise ValueError(f"Unknown interaction_mode: {interaction_mode}. Use 'full', 'random', 'target', 'feature', 'random-best', 'target-best', or 'feature-best'.")
+        
+        return X_int
+    
+    def interaction_test(self, X_cand, y, X_num):
+        '''
+        NOTE: This test is WIP and currently not used in the default pipeline.
+        Three aspects matter:
         1. Does the new feature behaves numerically? - are the interpolation and combination tests positive?
         2. Does the feature improve performance over the base features at all?
         3. Is the feature interaction truly numerical or just the same as a combination of two base features?
         Therefore, we label a feature as numerical if its interaction 
             a) behaves numerically,
             b) improves performance, and 
-            c) is not just a combination of the base features. (TODO)
+            c) is not just a combination of the base features. 
         '''
-        # TODO: Might need to account for the fact that some datasets have many categorical and possibly just one numerical feature s.t. numerical interactions cannot be tested but the feature can still interact numerically with other categoricals
-        base_cors = X_full.corrwith(y).abs()
-
-        # Reduce to 100 possible features to speed things up
-        if base_cors.shape[0]>100:
-            base_cors = base_cors.sort_values(ascending=False).head(100)
-            X_full = X_full.loc[:, base_cors.index]
-
+       
         interaction_cols = []
         for cnum, col in enumerate(X_cand.columns):
             if self.verbose:
                 print(f"\rInteraction test for column {cnum+1}/{len(X_cand.columns)} columns processed", end="", flush=True)
 
-            ### 1. Get Interactions
-            cols_use = [c for c in X_full.columns if c != col]
-            
-            X_int = pd.DataFrame(
-                index=X_full.index, 
-                columns=[f"{col}_/_{col2}" for col2 in cols_use]+ \
-                [f"{col}_x_{col2}" for col2 in cols_use]+ \
-                [f"{col}_-_{col2}" for col2 in cols_use]+ \
-                [f"{col}_+_{col2}" for col2 in cols_use]
-            )
-            
-            # TODO: Think about whether reversing - and / makes sense
-            # TODO: Think about whether setting nans for division by zero is appropriate
-            X_int[[f"{col}_/_{col2}" for col2 in cols_use]] = (X_cand[[col]*len(cols_use)] / X_full[cols_use].replace(0, np.nan).values).values
-            X_int[[f"{col}_x_{col2}" for col2 in cols_use]] = (X_cand[[col]*len(cols_use)] * X_full[cols_use].values).values
-            X_int[[f"{col}_-_{col2}" for col2 in cols_use]] = (X_cand[[col]*len(cols_use)] - X_full[cols_use].values).values
-            X_int[[f"{col}_+_{col2}" for col2 in cols_use]] = (X_cand[[col]*len(cols_use)] + X_full[cols_use].values).values
-
-            # Filter weird cases
-            X_int = X_int.loc[:, X_int.nunique()>2]
-
-            ### 2. Get Highest Correlation
-            corr_X_int = X_int.corrwith(y, method='spearman').abs().sort_values(ascending=False)
-            highest_corr = corr_X_int.index[0]
-            if self.interaction_mode == 'high_corr':
-                candidate_cols = [highest_corr]
-            elif self.interaction_mode == 'all':
-                candidate_cols = corr_X_int.index.tolist()
-            elif self.interaction_mode == 'corr_improve_over_base':
-                int_cors = X_int.corrwith(y, method='spearman').abs().to_frame()
-                int_cors_diff = int_cors.apply(lambda x: float([x-base_cors.loc[x.name.split(f"_{i}_")].max() for i in ['+', '-', '/', 'x'] if len(x.name.split(f"_{i}_"))>1][0][0]),axis=1)
-                candidate_cols = int_cors_diff.sort_values(ascending=False).index[:1].tolist()
-            elif isinstance(self.interaction_mode, int):
-                candidate_cols = corr_X_int.index[:self.interaction_mode].tolist()
-            else:
-                candidate_cols = []
-                print(f"Unknown interaction_mode: {self.interaction_mode}. Use 'high_corr', 'all' or an integer.")                
-            
-            for highest_corr in candidate_cols:
+            # 1. Get interaction candidates
+            X_int = self.get_interaction_candidates(X_cand[col], X_num, y,
+                                                    interaction_mode=self.interaction_mode,
+                                                    n_interaction_candidates=self.n_interaction_candidates)
+   
+            for highest_corr in X_int.columns:
                 col2 = [highest_corr.split(f"_{i}_")[1] for i in ['+', '-', '/', 'x'] if len(highest_corr.split(f"_{i}_"))>1][0]
                 X_use = X_int[[highest_corr]]
                 arithmetic_col = X_use.columns[0]
@@ -645,7 +682,6 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                     arithmetic_improves_performance = False
 
                 ### Combination test
-                # TODO: Make sure interpolation and combination tests for both features ran and comparing against the mean is appropriate (might need to compute additional scores for col2)
                 self.combination_test(X_use, y, early_stopping=False, assign_dtypes=False, verbose=False)
                 # 1. CHECK - The arithmetic combination feature behaves numerically
                 arithmetic_is_numeric = False
@@ -668,36 +704,8 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                     if arithmetic_is_numeric and arithmetic_improves_performance:
                         break
                 
-                # if not arithmetic_is_numeric:
-                #     max_degree = 3 # TODO: Make this a hyperparameter
-                #     self.interpolation_test(X_use, y, max_degree=max_degree, assign_dtypes=False)
-                #     for d in range(1, max_degree+1):
-                #         if d==1:
-                #             interpolation_method = 'linear'
-                #         elif d==2:
-                #             interpolation_method = 'poly2'
-                #         elif d==3:
-                #             interpolation_method = 'poly3'
-                #         elif d==4:
-                #             interpolation_method = 'poly4'
-                #         elif d==5:
-                #             interpolation_method = 'poly5'
-                #         else:
-                #             raise ValueError(f"Unsupported degree: {d}")
-                        
-                #         if self.interpolation_criterion == "win":
-                #             if self.significances[arithmetic_col][f"test_{interpolation_method}_superior"]<self.alpha:
-                #                 arithmetic_is_numeric = True
-                #                 best_setting = interpolation_method
-                #                 break
-                #         elif self.interpolation_criterion == "match":
-                #             if self.significances[arithmetic_col][f"test_mean_superior_to_{interpolation_method}"]>self.alpha:
-                #                 arithmetic_is_numeric = True
-                #                 # best_setting = interpolation_method # TODO: unsure whether this is the right condition 
-                #                 break
 
                 # 2. CHECK - The arithmetic combination feature improves performance over the base features
-                # TODO: Add significance level as a global hyperparameter
                 self.significances[col][f"test_arithmetic-best_superior_single-best"] = self.significance_test(
                     self.scores[arithmetic_col][best_setting] - self.scores[stronger_col][stronger_col_setting]
                 )       
@@ -705,7 +713,6 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                     arithmetic_improves_performance = True
 
                 # 3. CHECK - The arithmetic combination feature is not just a combination of the base features
-                # TODO: Might implement that, but likely not needed
 
                 if arithmetic_is_numeric and arithmetic_improves_performance:
                     self.dtypes[col] = "numeric"
@@ -717,9 +724,9 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
                 # Combine interaction performance
                 # x = X_full[col].astype(str) + X_full[col2].astype(str)
                 # if self.target_type == "regression":
-                #     self.scores[arithmetic_col]['combine'] = self.cv_scores_with_early_stopping(x.to_frame(), y, Pipeline(steps=[('model', TargetMeanRegressor())]))
+                #     self.scores[arithmetic_col]['combine'] = self.cv_func(x.to_frame(), y, Pipeline(steps=[('model', TargetMeanRegressor())]))
                 # else:
-                #     self.scores[arithmetic_col]['combine'] = self.cv_scores_with_early_stopping(x.to_frame(), y, Pipeline(steps=[('model', TargetMeanClassifier())]))
+                #     self.scores[arithmetic_col]['combine'] = self.cv_func(x.to_frame(), y, Pipeline(steps=[('model', TargetMeanClassifier())]))
                 
 
         remaining_cols = [x for x in X_cand.columns if x not in interaction_cols]
@@ -736,20 +743,20 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
 
         mode_cols = []
         for cnum, col in enumerate(X.columns):                
-            print(f"\Mode test: {cnum+1}/{len(X.columns)} columns processed", end="", flush=True)
+            print(f"\rMode test: {cnum+1}/{len(X.columns)} columns processed", end="", flush=True)
             x = X[col]
             modes = x.value_counts(dropna=False)
             for num_modes in range(1,self.max_modes+1):
                 mode_map = dict(zip(modes.index[:num_modes], range(num_modes)))
                 x_use = x.map(mode_map).fillna(num_modes)
                 # roc_auc_score(y, TargetMeanClassifier().fit(X[[x.name]]==0, y).predict_proba(X[[x.name]]==0)[:,1])
-                self.scores[col][f'mode{num_modes}'] = self.cv_scores_with_early_stopping(x_use.to_frame(), y, Pipeline([('model',  target_model)]))
+                self.scores[col][f'mode{num_modes}'] = self.cv_func(x_use.to_frame(), y, Pipeline([('model',  target_model)]))
 
                 self.significances[col][f"{num_modes}_superior_mean"] = self.significance_test(
                     self.scores[col][f'mode{num_modes}'] - self.scores[col]['mean']
                 )
 
-                if self.significances[col][f"{num_modes}_superior_mean"]<0.05:
+                if self.significances[col][f"{num_modes}_superior_mean"]<self.alpha:
                     self.dtypes[col] = "multimodal"
                     mode_cols.append(col)
                     break
@@ -758,7 +765,163 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
 
         return remaining_cols         
 
-    def run_test(self, X, y, test_name, **kwargs):
+    # def multivariate_performance_test(self, X_in, y_in, test_cols, max_cols_use=100):
+    #     # TODO: Implement a small TabM model as a proxy for neural nets as the downstream model
+    #     # TODO: Implement a method to process features in chunks if we have more than x columns to test. Maybe something like the cat-interaction test can be used to determine which columns to process together.
+    #     np.random.seed(42)
+    #     X = X_in.copy()
+    #     y = y_in.copy()
+        
+    #     if X.drop(test_cols, axis=1).shape[1] > max_cols_use:
+    #         X = pd.concat([
+    #             X[np.random.choice(X.drop(test_cols, axis=1).columns, size=max_cols_use, replace=False)],
+    #             X[test_cols]
+    #         ], axis=1)
+
+    #         prefix = f"LGB-subsample{X.shape[1]}"
+    #     else:
+    #         prefix = "LGB-full"
+
+    #     params = {
+    #                 "objective": "binary" if self.target_type=="binary" else "regression",
+    #                 "boosting_type": "gbdt",
+    #                 "n_estimators": 1000,
+    #                 'min_samples_leaf': 2,
+    #                 "max_depth": 5,
+    #                 "verbosity": -1
+    #             }
+        
+        
+    #     self.scores[prefix] = {}
+    #     self.significances[prefix] = {}
+    #     if self.verbose:
+    #         print(f"\rMultivariate performance test with {len(test_cols)} columns.")
+    #     # Get performance for all columns as numerical columns
+    #     X_use = X.copy()
+    #     # TODO: Think about including AG preprocessor prior to model fitting
+    #     obj_cols = X_use.select_dtypes(include=['object']).columns.tolist()
+    #     X_use[obj_cols] = X_use[obj_cols].astype('category')
+    #     X_use[test_cols] = X_use[test_cols].astype(float)  # Use float dtype for numerical columns
+    #     model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
+    #     pipe = Pipeline([("model", model)])
+    #     self.scores[prefix]['raw'], all_num_iter = self.cv_func(clean_feature_names(X_use), y, pipe, return_iterations=True)
+        
+    #     X_use = X.copy() 
+    #     # X_use = X_use.astype('float')  # Use category dtype for categorical columns
+    #     obj_cols = X_use.select_dtypes(include=['object']).columns.tolist()
+    #     X_use[obj_cols] = X_use[obj_cols].astype('category')
+    #     X_use[test_cols] = X_use[test_cols].astype('category')  # Use category dtype for categorical columns
+    #     model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
+    #     pipe = Pipeline([("model", model)])
+    #     self.scores[prefix][f"{len(test_cols)}-CAT"], all_remcat_iter = self.cv_func(clean_feature_names(X_use), y, pipe, return_iterations=True)
+
+    #     self.significances[prefix][f"{len(test_cols)}-CAT"] = p_value_wilcoxon_greater_than_zero(self.scores[prefix][f"{len(test_cols)}-CAT"]-self.scores[prefix]['raw'])
+        
+    #     if self.mvp_criterion=='significance':
+    #         significant = self.significances[prefix][f"{len(test_cols)}-CAT"] < self.alpha
+    #     elif self.mvp_criterion=='average':
+    #         significant = np.mean(self.scores[prefix][f"{len(test_cols)}-CAT"] - self.scores[prefix]['raw']) > 0
+    #     else:
+    #         raise ValueError(f"Unknown mvp_criterion: {self.mvp_criterion}. Use 'significance' or 'average'.")
+        
+    #     if significant:
+    #         if self.verbose:
+    #             print(f"ALL-CAT is significantly better than ALL-NUM with p-value {self.significances[prefix][f'{len(test_cols)}-CAT']:.3f}")
+    #             print(f"Execute per-column tests in backward selection mode.")
+    #         for col in test_cols:
+    #             self.dtypes[col] = 'categorical'
+    #         selection_mode = 'backward'
+    #     else:
+    #         if self.verbose:
+    #             print(f"ALL-CAT is not significantly better than ALL-NUM with p-value {self.significances[prefix][f'{len(test_cols)}-CAT']:.3f}")
+    #             print(f"Execute per-column tests in forward selection mode.")
+    #         for col in test_cols:
+    #             self.dtypes[col] = 'numeric'
+    #         selection_mode = 'forward'
+
+    #     if len(test_cols) > 1:
+    #         cat_cols = []
+    #         for num, col in enumerate(test_cols):
+    #             if self.verbose:
+    #                 print(f"\rColumn {num+1}/{len(test_cols)}: {col}", end="", flush=True)
+    #             X_use = X.copy()
+    #             obj_cols = X_use.select_dtypes(include=['object']).columns.tolist()
+    #             X_use[obj_cols] = X_use[obj_cols].astype('category')
+    #             if selection_mode == 'backward':
+    #                 use_scores = self.scores[prefix][f"{len(test_cols)}-CAT"]
+    #                 X_use[test_cols] = X_use[test_cols].astype('category')  # Use category dtype for categorical columns
+    #                 X_use[col] = X_use[col].astype(float)  
+    #                 suffix = "-asnum"
+    #             else:
+    #                 use_scores = self.scores[prefix]['raw']
+    #                 X_use[test_cols] = X_use[test_cols].astype(float)  # Use category dtype for categorical columns
+    #                 X_use[col] = X_use[col].astype('category')
+    #                 suffix = "-ascat"
+    #             # TODO: Make sure to prevent leaks with category dtypes
+    #             model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
+    #             pipe = Pipeline([("model", model)])
+    #             self.scores[prefix][f"{col}{suffix}"], cat_iter = self.cv_func(clean_feature_names(X_use), y, pipe, return_iterations=True)
+
+    #             self.significances[prefix][f"{col}{suffix}_superior_{prefix}"] = p_value_wilcoxon_greater_than_zero(self.scores[prefix][f"{col}{suffix}"]-use_scores)
+
+    #             if self.mvp_criterion=='significance':
+    #                 significant = self.significances[prefix][f"{col}{suffix}_superior_{prefix}"] < self.alpha
+    #             elif self.mvp_criterion=='average':
+    #                 significant = np.mean(self.scores[prefix][f"{col}{suffix}"]-use_scores) > 0
+    #             else:
+    #                 raise ValueError(f"Unknown mvp_criterion: {self.mvp_criterion}. Use 'significance' or 'average'.")
+
+    #             # if significant:
+    #             #     if self.verbose:
+    #             #         print(f"{col}{suffix} is significantly better in {selection_mode} mode with p-value {self.significances[prefix][f'{col}{suffix}_superior_{prefix}']:.3f}")
+    #             #     if self.verbose:
+    #             #         print(f"{col}{suffix} is significantly better in {selection_mode} mode with p-value {self.significances[prefix][f'{col}{suffix}_superior_{prefix}']:.3f}")
+    #                 self.dtypes[col] = 'numeric' if selection_mode == 'backward' else 'categorical'
+    #             if self.dtypes[col] == 'categorical':
+    #                 cat_cols.append(col)
+    #         if self.verbose:
+    #             print(f"\r{len(cat_cols)}/{len(test_cols)} columns are categorical.")
+    #     elif self.verbose:
+    #         if self.dtypes[test_cols[0]] == 'categorical':
+    #             print(f"\r1/{len(test_cols)} columns are categorical.")
+    #     return []
+
+
+    def adapt_for_mvp_test(self, X_cand_in, test_cols, col=None, mode='forward'):
+        if col is None:
+            X_out = X_cand_in.copy()
+            if mode == 'backward':
+                X_out[test_cols] = X_out[test_cols].astype(float)
+            elif mode == 'forward':
+                X_out[test_cols] = X_out[test_cols].astype('category')
+        else:
+            X_out = X_cand_in.copy()
+            if mode == 'backward':
+                X_out[col] = X_out[col].astype(float)
+            elif mode == 'forward':
+                X_out[col] = X_out[col].astype('category')
+        
+        return X_out
+        
+    def multivariate_performance_test(self, X_cand_in, y_in, 
+                                      test_cols, max_cols_use=100):
+        suffix = 'CAT'
+        cat_cols = super().multivariate_performance_test(X_cand_in, y_in, 
+                                      test_cols, suffix=suffix,  max_cols_use=max_cols_use)
+        
+        for col in test_cols:
+            if col in cat_cols:
+                self.dtypes[col] = 'categorical'
+            else:
+                self.dtypes[col] = 'numeric'
+        if self.verbose:
+            if self.dtypes[test_cols[0]] == 'categorical':
+                print(f"\r1/{len(test_cols)} columns are categorical.")
+        
+        return []
+
+    def run_test(self, X, y, test_name, test_cols=list(), **kwargs):
+        start = time.time()
         if test_name == 'dummy_mean':
             remaining_cols = self.get_dummy_mean_scores(X, y)
         elif test_name == 'leave_one_out':
@@ -770,25 +933,31 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         elif test_name == 'interpolation-log':
             remaining_cols = self.interpolation_test(np.log(X+1e-5), y, max_degree=self.max_degree)
         elif test_name == 'interaction':
-            if 'X_full' in kwargs:
-                X_full = kwargs['X_full']
+            if 'X_num' in kwargs:
+                X_num = kwargs['X_num']
             else:
-                X_full = X_num.copy()
-            remaining_cols = self.interaction_test(X, y, X_full=X_full)
+                X_num = X.copy()
+            remaining_cols = self.interaction_test(X, y, X_num=X_num)
         elif test_name == 'performance':
             remaining_cols = self.performance_test(X, y)
         elif test_name == 'mode':
             remaining_cols = self.mode_test(X, y)
+        elif test_name == 'multivariate_performance':
+            remaining_cols = self.multivariate_performance_test(X, y, test_cols, max_cols_use=self.mvp_max_cols_use)
         else:
             print(f"Unknown test_name: {test_name}. Use 'dummy_mean', 'leave_one_out', 'combination', 'interpolation', 'interaction' or 'performance'.")
             remaining_cols = X.columns.values.tolist()
-        
-        for col in set(X.columns) - set(remaining_cols):
-            self.removed_after_tests[col] = test_name
-        if self.verbose:
-            print(f"\r{len(remaining_cols)/len(X.columns):.2%} of the candidate columns remain after the {test_name} test.")
-        return remaining_cols
 
+        self.times[test_name] = time.time() - start
+        if test_name == 'multivariate_performance':
+            for col in test_cols:
+                self.removed_after_tests[col] = test_name
+        else:
+            for col in set(X.columns) - set(remaining_cols):
+                self.removed_after_tests[col] = test_name
+            # if self.verbose:
+            #     print(f"\r{len(remaining_cols)/len(X.columns):.2%} of the candidate columns remain after the {test_name} test.")
+        return remaining_cols
 
     def fit(self, X_input, y_input=None, verbose=False):
         if not isinstance(X_input, pd.DataFrame):
@@ -803,12 +972,16 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             if X[col].nunique()<=2:
                 self.orig_dtypes[col] = "binary"
 
+        self.original_cat_features = [key for key, value in self.orig_dtypes.items() if value == "categorical"]
+
         if self.target_type=="multiclass":
             # TODO: Fix this hack
             y = (y==y.value_counts().index[0]).astype(int)  # make it binary
             self.target_type = "binary"
         elif self.target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
             y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
+        else:
+            y = y.astype(float)
 
         self.col_names = X.columns
         self.dtypes = {col: "None" for col in  self.col_names}
@@ -822,38 +995,60 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
 
         if self.verbose:
             print(f"{len(numeric_cand_cols)} columns left for numeric/categorical detection")
-        X_num = X[numeric_cand_cols].copy().astype(float)
-        X_full = X_num.copy()
-
+        X_cand = X[numeric_cand_cols].copy().astype(float)
+        X_full = X_cand.copy()
+        # TODO: Reinvent the whole 'assign_numeric' logic
 
         ### TEST NUMERIC CANDIDATE COLUMNS
-        for test_name in self.tests_to_run:
-            if self.verbose:
-                print(f"Running test: {test_name}")
-            numeric_cand_cols = self.run_test(X_num, y, test_name, X_full=X_full)
-            if len(numeric_cand_cols)==0:
-                return
+        for test_name in self.tests_to_run:            
+            if test_name == 'interaction':
+                numeric_cols = [key for key,value in self.dtypes.items() if value=='numeric']
+                if len(numeric_cols)>0:
+                    X_num = X_full[numeric_cols]
+                elif X_cand.shape[1]>1:
+                    X_num = X_cand.copy()
+                elif X_full.drop(X_cand.columns,axis=1).shape[1]>1:
+                    possible_cols = X_full.drop(X_cand.columns,axis=1).columns
+                    X_num = X_full[np.random.choice(possible_cols, min([self.n_interaction_candidates, len(possible_cols)]), replace=False)].copy()
             else:
-                X_num = X_num[numeric_cand_cols].copy()
+                X_num = None
+
+            if test_name == 'multivariate_performance':
+                if self.assign_numeric:
+                    test_cols = numeric_cand_cols
+                else:
+                    test_cols = list(set(numeric_cand_cols)-set(self.original_cat_features))
+                    if len(test_cols)==0:
+                        numeric_cand_cols = []
+                        continue
+                if self.mvp_use_data=='all':
+                    numeric_cand_cols = self.run_test(X, y, test_name=test_name, test_cols=test_cols)
+                elif self.mvp_use_data=='numeric':
+                    numeric_cand_cols = self.run_test(X_full, y, test_name=test_name, test_cols=test_cols)
+            else:
+                numeric_cand_cols = self.run_test(X_cand, y, test_name, X_num=X_num)
+            if len(numeric_cand_cols)==0:
+                continue
+            else:
+                X_cand = X_cand[numeric_cand_cols].copy()
 
         # Simply assign all remaining numeric candidate columns as categorical
-        # TODO: Experiment with different ways to determine categorical features
         for col in numeric_cand_cols:
             self.dtypes[col] = "categorical"
-        
+
+        # TODO: Double-check that the assignment of categorical (&numerical) features is correct
         # Prepare objects to transform columns
-        reassign_cols = [col for col in X.columns if self.dtypes[col]=="categorical" and self.orig_dtypes[col]!="categorical"]
-        for col in reassign_cols:
+        self.reassign_cat_cols = [col for col in X.columns if self.dtypes[col]=="categorical" and self.orig_dtypes[col]!="categorical"]
+        for col in self.reassign_cat_cols:
             self.cat_dtype_maps[col] = pd.CategoricalDtype(categories=list(X[col].astype(str).fillna("nan").unique()))
-            # TODO: Might need to change to use only train / make the whole approach use accept a train/val/test split
 
         if self.assign_numeric:
-            reassign_cols = [col for col in X.columns if self.dtypes[col]=="numeric" and self.orig_dtypes[col]!="numeric"]
-            self.numeric_means = {col: X_num[col].mean() for col in reassign_cols}
+            self.reassign_num_cols = [col for col in X.columns if self.dtypes[col]=="numeric" and self.orig_dtypes[col]!="numeric"]
+            self.numeric_means = {col: X_full[col].mean() for col in self.reassign_num_cols}
 
+        return self
 
-
-    def transform(self, X_input, mode = "overwrite"):
+    def transform(self, X_input, mode = "overwrite", fillna_numeric=False):
         if not isinstance(X_input, pd.DataFrame):
             X_input = pd.DataFrame(X_input)
 
@@ -865,14 +1060,11 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
             elif mode == "add":
                 X[col+'_cat'] = X[col].astype(str).fillna("nan").astype(self.cat_dtype_maps[col])
                 self.dtypes[col+'_cat'] = "categorical"
-                self.orig_dtypes[col+'_cat'] = "categorical"
         
         if self.assign_numeric:
-            reassign_cols = [col for col in X.columns if self.dtypes[col]=="numeric" and self.orig_dtypes[col]!="numeric"]
-            for col in reassign_cols:
-                # TODO: Implement functionality for partially coerced columns
+            for col in self.reassign_num_cols:
                 X[col] = pd.to_numeric(X[col], errors= 'coerce').astype(float)
-                if X[col].isna().any() and self.orig_dtypes==[col]=="categorical":
+                if X[col].isna().any() and fillna_numeric:
                     X[col] = X[col].fillna(self.numeric_means[col])
 
         return X
@@ -881,97 +1073,30 @@ class FeatureTypeDetector(TransformerMixin, BaseEstimator):
         return {
             "target_type": self.target_type,
             "tests_to_run": self.tests_to_run,
+            "min_q_as_num": self.min_q_as_num,
+            "n_folds": self.n_folds,
+            "lgb_model_type": self.lgb_model_type,
             "max_degree": self.max_degree,
+            "max_modes": self.max_modes,
             "interpolation_criterion": self.interpolation_criterion,
-            "combination_criterion": self.combination_criterion,
+            "assign_numeric": self.assign_numeric,
+            "assign_numeric_with_combination": self.assign_numeric_with_combination,
+            "detect_numeric_in_string": self.detect_numeric_in_string,
+            "fit_cat_models": self.fit_cat_models,
             "combination_test_min_bins": self.combination_test_min_bins,
             "combination_test_max_bins": self.combination_test_max_bins,
             "binning_strategy": self.binning_strategy,
-            "lgb_model_type": self.lgb_model_type,
-            "significance_method": self.significance_method,
+            "combination_criterion": self.combination_criterion,
+            "drop_unique": self.drop_unique,
             "alpha": self.alpha,
-            "verbose": self.verbose,
-            "assign_numeric": self.assign_numeric,
-            "fit_cat_models": self.fit_cat_models,
-
+            "interaction_mode": self.interaction_mode,
+            "mvp_use_data": self.mvp_use_data,
+            "mvp_criterion": self.mvp_criterion,
+            "mvp_max_cols_use": self.mvp_max_cols_use,
+            "n_interaction_candidates": self.n_interaction_candidates,
+            "drop_modes": self.drop_modes,
+            "significance_method": self.significance_method,
+            "verbose": self.verbose
+            
         }
 
-    
-
-if __name__ == "__main__":
-    import openml
-    import pandas as pd
-    from sympy import rem
-    from utils import get_benchmark_dataIDs, get_metadata_df
-    from ft_detection import FeatureTypeDetector
-
-    benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
-    dataset_name = 'Fail'  # (['airfoil_self_noise', 'Amazon_employee_access', 'anneal', 'Another-Dataset-on-used-Fiat-500', 'bank-marketing', 'Bank_Customer_Churn', 'blood-transfusion-service-center', 'churn', 'coil2000_insurance_policies', 'concrete_compressive_strength', 'credit-g', 'credit_card_clients_default', 'customer_satisfaction_in_airline', 'diabetes', 'Diabetes130US', 'diamonds', 'E-CommereShippingData', 'Fitness_Club', 'Food_Delivery_Time', 'GiveMeSomeCredit', 'hazelnut-spread-contaminant-detection', 'healthcare_insurance_expenses', 'heloc', 'hiva_agnostic', 'houses', 'HR_Analytics_Job_Change_of_Data_Scientists', 'in_vehicle_coupon_recommendation', 'Is-this-a-good-customer', 'kddcup09_appetency', 'Marketing_Campaign', 'maternal_health_risk', 'miami_housing', 'NATICUSdroid', 'online_shoppers_intention', 'physiochemical_protein', 'polish_companies_bankruptcy', 'APSFailure', 'Bioresponse', 'qsar-biodeg', 'QSAR-TID-11', 'QSAR_fish_toxicity', 'SDSS17', 'seismic-bumps', 'splice', 'students_dropout_and_academic_success', 'taiwanese_bankruptcy_prediction', 'website_phishing', 'wine_quality', 'MIC', 'jm1', 'superconductivity']) 
-
-    tids, dids = get_benchmark_dataIDs(benchmark)  
-
-    remaining_cols = {}
-
-    for tid, did in zip(tids, dids):
-        task = openml.tasks.get_task(tid)  # to check if the datasets are available
-        data = openml.datasets.get_dataset(did)  # to check if the datasets are available
-        if dataset_name not in data.name:
-            continue
-        # else:
-        #     break
-        print(data.name)
-        X, _, _, _ = data.get_data()
-        y = X[data.default_target_attribute]
-        X = X.drop(columns=[data.default_target_attribute])
-        
-        if benchmark == "Grinsztajn" and X.shape[0]>10000:
-            X = X.sample(10000, random_state=0)
-            y = y.loc[X.index]
-
-        if task.task_type == "Supervised Classification":
-            target_type = "binary" if y.nunique() == 2 else "multiclass"
-        else:
-            target_type = 'regression'
-        if target_type=="multiclass":
-            # TODO: Fix this hack
-            y = (y==y.value_counts().index[0]).astype(int)  # make it binary
-            target_type = "binary"
-        elif target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
-            y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
-        else:
-            y = y.astype(float)
-
-
-
-        detector = FeatureTypeDetector(target_type=target_type, 
-                                    tests_to_run=['dummy_mean', 
-                                                  'leave_one_out', 
-                                                  'combination', 
-                                                  'interpolation', 
-                                                #   'interpolation-log',
-                                                #   'mode',
-                                                  'interaction', 
-                                                #   'performance'
-                                                  ],
-                                    max_degree=5,
-                                    interaction_mode='high_corr', 
-                                    interpolation_criterion="match",  # 'win' or 'match'
-                                    combination_criterion='win',
-                                    combination_test_min_bins=2,
-                                    combination_test_max_bins=2048,
-                                    binning_strategy='DT',  # 'lgb', 'KMeans' or 'DT'
-                                    # lgb_model_type='huge-capacity',
-                                    significance_method='wilcoxon',
-                                    alpha=0.05,
-                                    verbose=True
-                                    
-                                    )
-        
-        detector.fit(X, y, verbose=False)
-        rem_cols = list(detector.cat_dtype_maps.keys())
-        # print(pd.Series(detector.dtypes).value_counts())
-
-        remaining_cols[data.name] = rem_cols
-        print(pd.Series(detector.removed_after_tests).value_counts())
-        print(f"{data.name} ({len(rem_cols)}): {rem_cols}")
-        continue

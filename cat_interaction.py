@@ -1,32 +1,37 @@
+from matplotlib import axis
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from fe_utils import fe_combine
 from utils import sample_from_set
-from itertools import combinations
-from utils import make_cv_scores_with_early_stopping, p_value_wilcoxon_greater_than_zero, TargetMeanRegressor, TargetMeanClassifier, \
-    DummyClassifier, DummyRegressor
+from itertools import combinations 
+from utils import make_cv_function, p_value_wilcoxon_greater_than_zero
+from proxy_models import TargetMeanRegressor, TargetMeanClassifier
 from itertools import product, combinations
 from category_encoders import LeaveOneOutEncoder
 from sklearn.metrics import roc_auc_score, log_loss, root_mean_squared_error
+from base_preprocessor import BasePreprocessor
+from sklearn.dummy import DummyClassifier, DummyRegressor
 
-class CategoricalInteractionDetector(TransformerMixin, BaseEstimator):
+class CategoricalInteractionDetector(BasePreprocessor):
     # TODO: Write a common class for different categorical feature preprocessing modules
     # TODO: Add memory estimation and function to process columns in chunks if memory is not enough
+    # TODO: Make sure 'independent' and 'expand' modes work
+    # TODO: Include groupby interactions
     def __init__(self, 
                  target_type, 
+                 n_folds=5, alpha=0.1, significance_method='wilcoxon', mvp_criterion='significance', mvp_max_cols_use=100, random_state=42, verbose=True,
                  execution_mode='independent', # ['independent', 'reduce', 'expand']
                  max_order=2, num_operations='all',
-                 scores: dict = None, cv_func=None,
+                 scores: dict = None, 
                  min_cardinality=6,
                  ):
-        self.target_type = target_type
+        super().__init__(target_type=target_type, n_folds=n_folds, alpha=alpha, significance_method=significance_method, mvp_criterion=mvp_criterion, mvp_max_cols_use=mvp_max_cols_use, random_state=random_state, verbose=verbose)
         self.execution_mode = execution_mode
         self.max_order = max_order
         self.num_operations = num_operations
         self.scores = scores
-        self.cv_func = cv_func
         self.min_cardinality = min_cardinality
         
         if self.target_type=='regression':
@@ -37,29 +42,8 @@ class CategoricalInteractionDetector(TransformerMixin, BaseEstimator):
         if scores is None:
             self.scores = {}
 
-        if cv_func is None:
-            self.cv_func = make_cv_scores_with_early_stopping(target_type=self.target_type, n_folds=5)
-
         self.significances = {}
         self.new_col_set = []
-
-    # def combine(self, X_in, order=2, num_operations='all', seed=42, **kwargs):
-    #     # TODO: Implement as matrix operations to speed up the process
-    #     X = X_in.copy()
-    #     feat_combs = set(combinations(X.columns, order))
-    #     features = {}
-
-    #     if num_operations == "all":
-    #         feat_combs_use = feat_combs
-    #     else:
-    #         feat_combs_use = sample_from_set(feat_combs, num_operations)
-
-    #     for num, f_use in enumerate(feat_combs_use):
-    #         # try:
-    #         name = "_&_".join([str(i) for i in sorted(f_use)])
-    #         features[name] = X[list(f_use)].astype(str).apply(lambda x: "_&_".join(map(str, x)), axis=1)
-
-    #     return pd.DataFrame(features)
 
     def combine(self, X_in, order=2, num_operations='all', seed=42, **kwargs):
         # TODO: Implement as matrix operations to speed up the process
@@ -158,28 +142,36 @@ class CategoricalInteractionDetector(TransformerMixin, BaseEstimator):
 
     def find_interactions_expand(self, X, y=None):
         # TODO: Combine the three interaction functions into one
+        X_new = X.copy()
+
+        
         for order in range(2,self.max_order+1):
             print(f"\rFind order {order} interactions", end='', flush=True)
-            X_interact = self.combine(X, order=2, num_operations=self.num_operations)
+            X_interact = self.combine(X_new, order=2, num_operations=self.num_operations)
             
             add_col_set = []
             for num, col in enumerate(X_interact.columns):
                 self.significances[col] = {}
                 print(f"\rProcessing column {num+1}/{len(X_interact.columns)}", end='', flush=True)
                 base_cols = col.split('_&_')
-                self.scores[col] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
+                if col not in self.scores:
+                    self.scores[col] = {}
+                if 'mean' not in self.scores[col]:
+                    self.scores[col]['mean'] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
 
                 for base_col in base_cols:
                     self.significances[col][base_col] = p_value_wilcoxon_greater_than_zero(
-                        self.scores[col] - self.scores[base_col]
+                        self.scores[col]['mean'] - self.scores[base_col]['mean']
                     )
 
                 if all(np.array(list(self.significances[col].values())) < 0.05):
                     add_col_set.append(col)
                     self.new_col_set.append(col)
+
+            X_new = pd.concat([X_new,X_interact[add_col_set]], axis=1)
+            X_new = X_new.copy() # Avoid defragmentation issues
             
-            X = pd.concat([X,X_interact[add_col_set]], axis=1)
-            X = X.copy() # Avoid defragmentation issues
+            return X_new
 
     def find_interactions_independent(self, X, y=None):
         X_new = X.copy()
@@ -191,12 +183,16 @@ class CategoricalInteractionDetector(TransformerMixin, BaseEstimator):
             for num, col in enumerate(X_interact.columns):
                 self.significances[col] = {}
                 print(f"\rProcessing column {num+1}/{len(X_interact.columns)}", end='', flush=True)
-                base_cols = col.split('_&_')
-                self.scores[col] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
+                base_cols = col.split('_&_') # Assume previous results for base cols are already computed
+                
+                if col not in self.scores:
+                    self.scores[col] = {}
+                if 'mean' not in self.scores[col]:
+                    self.scores[col] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
 
                 for base_col in base_cols:
                     self.significances[col][base_col] = p_value_wilcoxon_greater_than_zero(
-                        self.scores[col] - self.scores[base_col]
+                        self.scores[col]['mean'] - self.scores[base_col]['mean']
                     )
 
                 if all(np.array(list(self.significances[col].values())) < 0.05):
@@ -204,6 +200,8 @@ class CategoricalInteractionDetector(TransformerMixin, BaseEstimator):
                     self.new_col_set.append(col)
             X_new = pd.concat([X_new,X_interact[add_col_set]], axis=1)
             X_new = X_new.copy() # Avoid defragmentation issues
+            
+            return X_new
 
     def find_interactions_reduce(self, X, y=None):
         X_base = X.copy()
@@ -228,8 +226,10 @@ class CategoricalInteractionDetector(TransformerMixin, BaseEstimator):
             for num, col in enumerate(X_interact.columns):
                 self.significances[col] = {}
                 print(f"\rProcessing column {num+1}/{len(X_interact.columns)}", end='', flush=True)
-
-                self.scores[col] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
+                if col not in self.scores:
+                    self.scores[col] = {}
+                if 'mean' not in self.scores[col]:
+                    self.scores[col]['mean'] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
 
                 base_cols = col.split('_&_')
                 
@@ -239,11 +239,13 @@ class CategoricalInteractionDetector(TransformerMixin, BaseEstimator):
                     base_cols += ['_&_'.join(i) for i in child_cols]
                 for base_col in base_cols:
                     if not base_col in self.scores:
+                        self.scores[base_col] = {}
+                    if 'mean' not in self.scores[base_col]:
                         raw_cols = base_col.split('_&_')
-                        self.scores[base_col] = self.cv_func(self.combine(X[raw_cols], order=len(raw_cols)), y, Pipeline([('model', self.target_model)]))
+                        self.scores[base_col]['mean'] = self.cv_func(self.combine(X[raw_cols], order=len(raw_cols)), y, Pipeline([('model', self.target_model)]))
 
                     self.significances[col][base_col] = p_value_wilcoxon_greater_than_zero(
-                        self.scores[col] - self.scores[base_col]
+                        self.scores[col]['mean'] - self.scores[base_col]['mean']
                     )
 
                 if all(np.array(list(self.significances[col].values())) < 0.05):
@@ -259,6 +261,32 @@ class CategoricalInteractionDetector(TransformerMixin, BaseEstimator):
                 X_new = pd.concat([X_new,X_interact[add_col_set]], axis=1)
                 X_new = X_new.copy() # Avoid defragmentation issues
 
+        return X_new    
+
+    # def adapt_col_for_mvp_test(self, X_cand_in, col=None, test_cols, mode='backward'):
+    #     if col is None:
+    #         return X_cand_in.copy() # For cat detection, assume that all columns are given as categorical: For irrelevant cat: Use drop
+    #     else:
+    #         X = X_cand_in.copy()
+    #         if mode == 'backward':
+    #             X_out = X.drop([col], axis=1) # Drop
+    #         elif mode == 'forward':
+    #             X_out = X.drop(set(test_cols)-set([col]), axis=1) # Drop all test columns
+    #         # For cat detection, assume that all columns are given as categorical and change to num in backward, while all to cat in forward
+    #         # For irrelevant cat: Use the same drop logic
+    #         return X_out
+
+    def multivariate_performance_test(self, X_cand_in, y_in, 
+                                      test_cols, max_cols_use=100):
+        suffix = 'COMB'
+        self.new_col_set = super().multivariate_performance_test(X_cand_in, y_in, 
+                                      test_cols, suffix=suffix,  max_cols_use=max_cols_use)
+                
+        print(f"{len(self.new_col_set)} new columns after multivariate performance test.")
+        
+        rejected_cols = set(test_cols) - set(self.new_col_set)
+        return X_cand_in.drop(rejected_cols,axis=1)
+
     def fit(self, X_in, y=None):
         # TODO: Add logic to filter correlated new features early on
         # TODO: Add three different execution modes: sequential independent, sequential with performant subset, and sequential with lower order as new features
@@ -268,19 +296,23 @@ class CategoricalInteractionDetector(TransformerMixin, BaseEstimator):
         print(f"Removing {X.shape[1] - X.loc[:, X.nunique() > self.min_cardinality].shape[1]} low cardinality features with less than {self.min_cardinality} unique values")
         X = X.loc[:, X.nunique() > self.min_cardinality]  # Remove low cardinality features
 
-
         for col in X.columns:
             if col not in self.scores:
-                self.scores[col] = self.cv_func(X[[col]], y, Pipeline([('model', self.target_model)]))
-        
+                self.scores[col] = {}
+            if 'mean' not in self.scores[col]:
+                self.scores[col]['mean'] = self.cv_func(X[[col]], y, Pipeline([('model', self.target_model)]))
+
         if self.execution_mode == "expand":
-            self.find_interactions_expand(X, y)
+            X_new = self.find_interactions_expand(X, y)
         elif self.execution_mode == "independent":
-            self.find_interactions_independent(X, y)
+            X_new = self.find_interactions_independent(X, y)
         elif self.execution_mode == "reduce":
-            self.find_interactions_reduce(X, y)
+            X_new = self.find_interactions_reduce(X, y)
         else:
             raise ValueError(f"Unknown execution mode: {self.execution_mode}. Use 'sequential' or 'independent'.")
+        
+        X_new = self.multivariate_performance_test(X_new, y, test_cols=self.new_col_set, max_cols_use=self.mvp_max_cols_use)
+        
         return self
     
     def transform(self, X_in):        
@@ -307,136 +339,171 @@ class CategoricalInteractionDetector(TransformerMixin, BaseEstimator):
         # return X
 
 
+
 if __name__ == "__main__":
+    from ft_detection import clean_feature_names
+    import os
+    from utils import *
     import openml
-    import pandas as pd
-    from sympy import rem
-    from utils import get_benchmark_dataIDs, get_metadata_df
-    from ft_detection import FeatureTypeDetector
-
-    benchmark = "TabZilla"  # or "TabArena", "TabZilla", "Grinsztajn"
-    # dataset_name = 'concrete_compressive_strength'  # (['airfoil_self_noise', 'Amazon_employee_access', 'anneal', 'Another-Dataset-on-used-Fiat-500', 'bank-marketing', 'Bank_Customer_Churn', 'blood-transfusion-service-center', 'churn', 'coil2000_insurance_policies', 'concrete_compressive_strength', 'credit-g', 'credit_card_clients_default', 'customer_satisfaction_in_airline', 'diabetes', 'Diabetes130US', 'diamonds', 'E-CommereShippingData', 'Fitness_Club', 'Food_Delivery_Time', 'GiveMeSomeCredit', 'hazelnut-spread-contaminant-detection', 'healthcare_insurance_expenses', 'heloc', 'hiva_agnostic', 'houses', 'HR_Analytics_Job_Change_of_Data_Scientists', 'in_vehicle_coupon_recommendation', 'Is-this-a-good-customer', 'kddcup09_appetency', 'Marketing_Campaign', 'maternal_health_risk', 'miami_housing', 'NATICUSdroid', 'online_shoppers_intention', 'physiochemical_protein', 'polish_companies_bankruptcy', 'APSFailure', 'Bioresponse', 'qsar-biodeg', 'QSAR-TID-11', 'QSAR_fish_toxicity', 'SDSS17', 'seismic-bumps', 'splice', 'students_dropout_and_academic_success', 'taiwanese_bankruptcy_prediction', 'website_phishing', 'wine_quality', 'MIC', 'jm1', 'superconductivity']) 
-
-    tids, dids = get_benchmark_dataIDs(benchmark)  
-
-    remaining_cols = {}
-
-    for tid, did in zip(tids, dids):
-        task = openml.tasks.get_task(tid)  # to check if the datasets are available
-        data = openml.datasets.get_dataset(did)  # to check if the datasets are available
-        # if data.name!=dataset_name:
-        #     continue
-        # else:
-        #     break
-        print(data.name)
-        X, _, _, _ = data.get_data()
-        y = X[data.default_target_attribute]
-        X = X.drop(columns=[data.default_target_attribute])
-        
-        if benchmark == "Grinsztajn" and X.shape[0]>10000:
-            X = X.sample(10000, random_state=0)
-            y = y.loc[X.index]
-
-        if task.task_type == "Supervised Classification":
-            target_type = "binary" if y.nunique() == 2 else "multiclass"
+    from ft_detection import clean_feature_names
+    benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
+    for benchmark in ["Grinsztajn", "TabArena", "TabZilla"]:
+        exp_name = f"EXP_3-order-catinteraction_{benchmark}"
+        if os.path.exists(f"{exp_name}.pkl"):
+            with open(f"{exp_name}.pkl", "rb") as f:
+                results = pickle.load(f)
         else:
-            target_type = 'regression'
-        if target_type=="multiclass":
-            # TODO: Fix this hack
-            y = (y==y.value_counts().index[0]).astype(int)  # make it binary
-            target_type = "binary"
-        elif target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
-            y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
-        else:
-            y = y.astype(float)
+            results = {}
+            results['performance'] = {}
+            results['iterations'] = {}
+            results['significances'] = {}
 
+        tids, dids = get_benchmark_dataIDs(benchmark)  
 
-        X_cat = X.select_dtypes(include=['object', 'category'])
-        X_cat = X_cat.loc[:, X_cat.nunique() >2] # remove columns with less than 3 unique values
-        print(f"Dataset: {data.name} with {X_cat.shape[1]} categorical columns")
-        if X_cat.shape[1] > 1:
-            cd = CategoricalInteractionDetector(target_type, max_order=3, execution_mode='reduce').fit(X_cat, y)
-            X_new = cd.transform(X_cat)
-            print(pd.DataFrame(cd.scores).mean().sort_values(ascending=False))
-            print(f"New columns: {len(cd.new_col_set)}: {cd.new_col_set}")
+        remaining_cols = {}
 
+        for tid, did in zip(tids, dids):
+            task = openml.tasks.get_task(tid)  # to check if the datasets are available
+            data = openml.datasets.get_dataset(did)  # to check if the datasets are available
+            if data.name in results['performance']:
+                print(f"Skipping {data.name} as it already exists in results.")
+                print(pd.DataFrame(results['performance'][data.name]).mean().sort_values(ascending=False))
+                continue
+            # else:
+            #     break
+            print(data.name)
+            if data.name == 'guillermo':
+                continue
+            X, _, _, _ = data.get_data()
+            y = X[data.default_target_attribute]
+            X = X.drop(columns=[data.default_target_attribute])
+            
+            if benchmark == "Grinsztajn" and X.shape[0]>10000:
+                X = X.sample(10000, random_state=0)
+                y = y.loc[X.index]
 
-        # detector = FeatureTypeDetector(target_type=target_type, 
-        #                             interpolation_criterion="match",  # 'win' or 'match'
-        #                             lgb_model_type='huge-capacity',
-        #                             verbose=False)
-        
-        # # detector.fit(X, y, verbose=False)
-        # # print(pd.Series(detector.dtypes).value_counts())
-        
-        # rem_cols: list = detector.handle_trivial_features(X)
-        # print('--'*50)
-        # print(f"\rTrivial features removed: {X.shape[1]-len(rem_cols)}\r")
-        # X = X[rem_cols]
-        # if len(rem_cols) == 0:
-        #     remaining_cols[data.name] = []
-        #     continue
+            if task.task_type == "Supervised Classification":
+                target_type = "binary" if y.nunique() == 2 else "multiclass"
+            else:
+                target_type = 'regression'
+            if target_type=="multiclass":
+                # TODO: Fix this hack
+                y = (y==y.value_counts().index[0]).astype(int)  # make it binary
+                target_type = "binary"
+            elif target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
+                y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
+            else:
+                y = y.astype(float)
+            
+            cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+            cat_cols = [col for col in cat_cols if X[col].nunique() > 2]
+            if len(cat_cols) == 0:
+                print(f"Dataset {data.name} has no candidate features, skipping...")
+                continue
+            
+            X_cat = X.select_dtypes(include=['object', 'category'])
+            X_cat = X_cat.loc[:, X_cat.nunique() >2] # remove columns with less than 3 unique values
+            print(f"Dataset: {data.name} with {X_cat.shape[1]} categorical columns")
+            if X_cat.shape[1] > 1:
+                cd = CategoricalInteractionDetector(target_type, max_order=3, execution_mode='reduce').fit(X_cat, y)
+                X_new = cd.transform(X_cat)
+                # print(pd.DataFrame(cd.scores).mean().sort_values(ascending=False))
+                print(f"New columns: {len(cd.new_col_set)}: {cd.new_col_set}")
+            else:
+                print(f"Dataset {data.name} has only one categorical column, skipping...")
+                continue
+            
+            rem_cols = cd.new_col_set
+            # rem_cols = [col for col in rem_cols if X[col].nunique() > 2]  
+            print(f"{data.name} ({len(rem_cols)}): {rem_cols}")
 
-        # X_num = X[rem_cols].astype(float).copy()
-        
-        # rem_cols = detector.get_dummy_mean_scores(X, y)
-        # print('--'*50)
-        # print(f"\rIrrelevant features removed: {X.shape[1]-len(rem_cols)}\r")
-        # X = X[rem_cols]
-        # if len(rem_cols) == 0:
-        #     remaining_cols[data.name] = []
-        #     continue    
+            if len(rem_cols) == 0:
+                print(f"Dataset {data.name} has no candidate features, skipping...")
+                continue
+            
+            # if len(set(num_cols)-set(rem_cols))>100:
+            #     print(f"Dataset {data.name} has too many numerical features, downsampling for efficiency.")
+            #     use_cols = np.unique(np.random.choice(num_cols, size=100, replace=False).tolist()+rem_cols).tolist()
+            # else:
+            #     use_cols = np.unique(num_cols+rem_cols).tolist()
 
-        # rem_cols = detector.leave_one_out_test(X, y)
-        # print('--'*50)
-        # print(f"\rLeave-One-Out features removed: {X.shape[1]-len(rem_cols)}\r")
-        # X = X[rem_cols]
-        # if len(rem_cols) == 0:
-        #     remaining_cols[data.name] = []
-        #     continue
+            # X = X[use_cols]
+            # if len(rem_cols) >10:
+            #     print(f"Dataset {data.name} has {len(rem_cols)} features, skipping...")
+            #     continue
+            # TODO: Rethink which parameters to use
+            params = {
+                        "objective": "binary" if target_type=="binary" else "regression",
+                        "boosting_type": "gbdt",
+                        "n_estimators": 1000,
+                        'min_samples_leaf': 2,
+                        "max_depth": 5,
+                        "verbosity": -1
+                    }
+            cv_func = make_cv_function(target_type=target_type, verbose=False, n_folds=10)
 
-        
-        # rem_cols = detector.combination_test(X, y, max_binning_configs=3)
-        # print('--'*50)
-        # print(f"\rCombination features removed: {X.shape[1]-len(rem_cols)}\r")
-        # X = X[rem_cols]
-        # if len(rem_cols) == 0:
-        #     remaining_cols[data.name] = []
-        #     continue
-        
-        # rem_cols = detector.interpolation_test(X, y, max_degree=3)
-        # print('--'*50)
-        # print(f"\rInterpolation features removed: {X.shape[1]-len(rem_cols)}\r")
-        # X = X[rem_cols]
-        # if len(rem_cols) == 0:
-        #     remaining_cols[data.name] = []
-        #     continue
+            model = lgb.LGBMClassifier(**params) if target_type=="binary" else lgb.LGBMRegressor(**params)
+            pipe = Pipeline([("model", model)])
 
-        # rem_cols = detector.interaction_test(X, X_num, y)
-        # print('--'*50)
-        # print(f"\rInteraction features removed: {X.shape[1]-len(rem_cols)}\r")
+            performances = {}
+            iterations = {}
+            significances = {}
+            X_use = X.copy()
+            X_use[cat_cols] = X_use[cat_cols].astype('category')
+            all_perf, all_iter = cv_func(clean_feature_names(X_use), y, pipe, return_iterations=True)
+            print(f"ALL: {np.mean(all_perf):.3f}, {np.mean(all_iter):.0f} iterations")
 
-        # # rem_cols = detector.performance_test(X, y)
-        # # print('--'*50)
-        # # print(f"\rLGB-performance features removed: {X.shape[1]-len(rem_cols)}\r")
-        # # X = X[rem_cols]
-        # # if len(rem_cols) == 0:
-        # #     remaining_cols[data.name] = []
-        # #     continue
+            X_use = X.copy()
+            X_use[cat_cols] = X_use[cat_cols].astype('category')
+            for col in rem_cols:
+                i_cols = col.split('_&_')
+                for num, i_col in enumerate(i_cols):
+                    if num == 0:
+                        X_use[col] = X_use[i_col].astype('U')
+                    else:
+                        X_use[col] = (X_use[col].astype('U')+"_&_"+X_use[i_col].astype('U'))
+                X_use[col] = X_use[col].astype('category')
+            interact_all_perf, interact_all_iter = cv_func(clean_feature_names(X_use), y, pipe, return_iterations=True)
+            print(f"ALL-INTERACTIONs: {np.mean(interact_all_perf):.3f}, {np.mean(interact_all_iter):.0f} iterations")
 
-        # remaining_cols[data.name] = rem_cols
-        # print(f"{data.name} ({len(rem_cols)}): {rem_cols}")
+            performances['ALL'] = all_perf
+            performances['INTERACT-ALL'] = interact_all_perf
+            iterations['ALL'] = all_iter
+            iterations['INTERACT-ALL'] = interact_all_iter
+            significances['INTERACT-ALL'] = p_value_wilcoxon_greater_than_zero(interact_all_perf-all_perf)
+            if significances['INTERACT-ALL'] < 0.05:
+                print(f"INTERACT-ALL is significantly better than ALL with p-value {significances['INTERACT-ALL']:.3f}")
 
-        # # if len(rem_cols) > 0:
-        # #     cat_res = CatResolutionDetector(target_type='regression').fit(X, y)
-        # #     print(pd.Series(cat_res.optimal_thresholds).sort_values(ascending=False))
+            if len(rem_cols) > 1:
+                for num, col in enumerate(rem_cols):
+                    X_use = X.copy()
+                    X_use[cat_cols] = X_use[cat_cols].astype('category')
+                    # TODO: Make sure to prevent leaks
+                    i_cols = col.split('_&_')
+                    for i_num, i_col in enumerate(i_cols):
+                        if i_num == 0:
+                            X_use[col] = X_use[i_col].astype('U')
+                        else:
+                            X_use[col] = (X_use[col].astype('U')+"_&_"+X_use[i_col].astype('U'))
+                    X_use[col] = X_use[col].astype('category')
+                    col_perf, col_iter = cv_func(clean_feature_names(X_use), y, pipe, return_iterations=True)
+                    print(f"{col}: {np.mean(col_perf):.4f}, {np.mean(col_iter):.0f} iterations")
 
-        # # if data.name=='nyc-taxi-green-dec-2016':
-        # #     break
+                    # performances[f'ALL-NUM'] = str(round(np.mean(num_perf), 3)) + f" ({np.std(num_perf):.3f})"
+                    performances[f'{col}'] = col_perf
+                    iterations[f'{col}'] = col_iter
+                    print(f"Column {num+1}/{len(rem_cols)}: {col}", )
+                    significances[col] = p_value_wilcoxon_greater_than_zero(col_perf-all_perf)
+                    if significances[col] < 0.05:
+                        print(f"{col} is significantly better than ALL-NUM with p-value {significances[col]:.3f}")
 
-        # # for i, col in enumerate(X.columns):
-        # #     grouped_interpolation_test(X[col],(y==y[0]).astype(int), 'binary', add_dummy=True if i==0 else False)
+            print(pd.DataFrame(performances).mean().sort_values(ascending=False))
 
+            results['performance'][data.name] = performances
+            results['iterations'][data.name] = iterations
+            results['significances'][data.name] = significances
 
+            with open(f"{exp_name}.pkl", "wb") as f:
+                pickle.dump(results, f)
 
 
