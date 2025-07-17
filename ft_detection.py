@@ -176,9 +176,9 @@ class FeatureTypeDetector(BasePreprocessor):
         
         return numeric_cand_cols
 
-    def get_dummy_mean_scores(self, X, y):
+    def dummy_mean_test(self, X, y):
         X_use = X.copy()
-        super().get_dummy_mean_scores(X_use, y)
+        self.get_dummy_mean_scores(X_use, y)
         irrelevant_cols = []
         for col in X_use.columns:
             if self.significances[col]["test_irrelevant_mean"]>self.alpha: #'mean equal or worse than dummy'
@@ -189,33 +189,6 @@ class FeatureTypeDetector(BasePreprocessor):
             print(f"\r{len(irrelevant_cols)}/{len(X_use.columns)} columns are numeric acc. to dummy_mean test.")
 
         return [col for col in X_use.columns if col not in irrelevant_cols]
-    
-    def single_interpolation_test(
-            self,
-            x, y, 
-            interpolation_method='linear',
-    ):        
-        if not x.dtype in ["int", "float", "bool"]:
-            x = pd.to_numeric(x, errors='coerce')
-
-        if interpolation_method == 'linear':
-            interpol_model = UnivariateLogisticClassifier() if self.target_type == "binary" else UnivariateLinearRegressor()
-        elif interpolation_method in [f'poly{d}' for d in range(2, 100)]:
-            degree = int(interpolation_method[4:])
-            interpol_model = PolynomialLogisticClassifier(degree=degree) if self.target_type == "binary" else PolynomialRegressor(degree=degree)
-        else:
-            raise ValueError(f"Unsupported interpolation method: {interpolation_method}")
-
-        pipe = Pipeline([
-            # PowerTransformer removes a few more features to be numeric than standaradscaler, mostly the very imbalanced ones
-            # ("standardize", PowerTransformer(method='yeo-johnson', standardize=True, )),
-            ("standardize", QuantileTransformer(n_quantiles=np.min([1000, int(x.shape[0]*(1-(1/self.n_folds)))]), random_state=42)),
-            ("impute", SimpleImputer(strategy="median")),
-            # ("standardize", StandardScaler()),
-            ("model", interpol_model)
-        ])
-
-        return self.cv_func(x.to_frame(), y, pipe)
 
     def interpolation_test(self, X, y, max_degree=3, assign_dtypes=True):
         X_use = X.copy()
@@ -275,42 +248,6 @@ class FeatureTypeDetector(BasePreprocessor):
             remaining_cols = [x for x in remaining_cols if x not in interpol_cols]
 
         return remaining_cols
-
-    def single_combination_test(
-            self,
-            x, y, 
-            max_bin=255,
-    ):        
-        if not x.dtype in ["int", "float", "bool"]:
-            x = pd.to_numeric(x, errors='coerce')
-
-        if self.binning_strategy == 'lgb':
-            pipe = Pipeline([
-                ("binning", LightGBMBinner(max_bin=max_bin)),
-                ("model", TargetMeanClassifier() if self.target_type == "binary" else TargetMeanRegressor())
-            ])
-        elif self.binning_strategy == 'KMeans':
-            from utils import KMeansBinner
-            pipe = Pipeline([
-                ("binning", KMeansBinner(max_bin=max_bin)),
-                ("model", TargetMeanClassifier() if self.target_type == "binary" else TargetMeanRegressor())
-            ])
-        elif self.binning_strategy == 'DT':
-            if self.target_type == "regression":
-                from sklearn.tree import DecisionTreeRegressor as tree_binner
-            else:
-                from sklearn.tree import DecisionTreeClassifier as tree_binner
-            pipe = Pipeline([
-                ("model", tree_binner(
-                    max_leaf_nodes = max_bin,     # desired number of bins
-                    min_samples_leaf = 1,   # min pts per bin to avoid overfitting
-                    # criterion = "entropy"   # or "gini"
-                ))
-            ])
-        else:
-            raise ValueError(f"Unsupported binning strategy: {self.binning_strategy}. Use 'lgb', 'KMeans' or 'DT'.")            
-
-        return self.cv_func(x.to_frame(), y, pipe)
     
     def combination_test(self, X, y, max_binning_configs=3, early_stopping=True, assign_dtypes = True, verbose=False):
         '''
@@ -343,7 +280,7 @@ class FeatureTypeDetector(BasePreprocessor):
                     print(f"\rCombination test with max_bin of {m_bin}: {cnum-minus_done+1}/{len(remaining_cols)} columns processed", end="", flush=True)
 
                 x_use = X_use[col].copy()
-                self.scores[col][f"combination_test_{m_bin}"] = self.single_combination_test(x_use, y, max_bin=m_bin)
+                self.scores[col][f"combination_test_{m_bin}"] = self.single_combination_test(x_use, y, max_bin=m_bin, binning_strategy=self.binning_strategy)
                 
                 self.significances[col][f"test_combination_test_{m_bin}_superior"] = self.significance_test(
                         self.scores[col][f"combination_test_{m_bin}"] - self.scores[col]["mean"]
@@ -672,7 +609,7 @@ class FeatureTypeDetector(BasePreprocessor):
 
                 ### 3. Get regular, binned and polynomial performance of the interaction feature and test significance
                 # Regular TE performance
-                self.get_dummy_mean_scores(X_use, y)
+                self.dummy_mean_test(X_use, y)
                 self.significances[col][f"test_arithmetic-mean_superior_single-best"] = self.significance_test(
                     self.scores[arithmetic_col]['mean'] - self.scores[stronger_col][stronger_col_setting]
                 )       
@@ -923,7 +860,7 @@ class FeatureTypeDetector(BasePreprocessor):
     def run_test(self, X, y, test_name, test_cols=list(), **kwargs):
         start = time.time()
         if test_name == 'dummy_mean':
-            remaining_cols = self.get_dummy_mean_scores(X, y)
+            remaining_cols = self.dummy_mean_test(X, y)
         elif test_name == 'leave_one_out':
             remaining_cols = self.leave_one_out_test(X, y)
         elif test_name == 'combination':
@@ -966,7 +903,7 @@ class FeatureTypeDetector(BasePreprocessor):
             y_input = pd.Series(y_input)
         X = X_input.copy()
         y = y_input.copy()
-        
+         
         self.orig_dtypes = {col: "categorical" if dtype in ["object", "category", str] else "numeric" for col,dtype in dict(X.dtypes).items()}
         for col in self.orig_dtypes:
             if X[col].nunique()<=2:
