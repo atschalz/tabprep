@@ -10,6 +10,7 @@ import lightgbm as lgb
 from utils import clean_feature_names
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import QuantileTransformer
+import time
 
 class BasePreprocessor(TransformerMixin, BaseEstimator):
     def __init__(self, target_type,
@@ -202,7 +203,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         X_use = self.adapt_for_mvp_test(X_use, col=None, test_cols=test_cols, mode='backward')
         model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
         pipe = Pipeline([("model", model)])
-        self.scores[prefix]['raw'], all_num_iter = self.cv_func(clean_feature_names(X_use), y, pipe, return_iterations=True)
+        self.scores[prefix]['raw'] = self.cv_func(clean_feature_names(X_use), y, pipe, return_iterations=False)
         
         ### Get performance for all columns with interactions
         X_use = X_cand.copy() 
@@ -214,7 +215,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         X_use = self.adapt_for_mvp_test(X_use, col=None, test_cols=test_cols, mode='forward')
         model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
         pipe = Pipeline([("model", model)])
-        self.scores[prefix][f"{len(test_cols)}-{suffix}"], all_remcat_iter = self.cv_func(clean_feature_names(X_use), y, pipe, return_iterations=True)
+        self.scores[prefix][f"{len(test_cols)}-{suffix}"] = self.cv_func(clean_feature_names(X_use), y, pipe)
 
         self.significances[prefix][f"{len(test_cols)}-{suffix}"] = self.significance_test(self.scores[prefix][f"{len(test_cols)}-{suffix}"]-self.scores[prefix]['raw'])
 
@@ -267,7 +268,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
                 # TODO: Make sure to prevent leaks with category dtypes
                 model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
                 pipe = Pipeline([("model", model)])
-                self.scores[prefix][f"{col}{suffix}"], cat_iter = self.cv_func(clean_feature_names(X_use), y, pipe, return_iterations=True)
+                self.scores[prefix][f"{col}{suffix}"] = self.cv_func(clean_feature_names(X_use), y, pipe)
 
                 self.significances[prefix][f"{col}{suffix}_superior_{ref_config}"] = self.significance_test(self.scores[prefix][f"{col}{suffix}"]-use_scores)
 
@@ -312,7 +313,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         
         return remaining_cols
 
-    def fit(self, X_input, y_input=None, verbose=False):
+    def fit(self, X_input, y_input):
         return self
 
     def transform(self, X_input):

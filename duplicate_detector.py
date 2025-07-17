@@ -102,7 +102,9 @@ def make_cv_function_for_duplicated_data(target_type, n_folds=5, early_stopping_
     else:   
         raise ValueError("target_type must be 'binary' or 'regression'")
 
-    def cv_func(X_df_in, y_s_in, pipeline, return_iterations=False, return_preds=False, scale_y=False, 
+    def cv_func(X_df_in: pd.DataFrame, 
+                y_s_in: pd.Series, 
+                pipeline, return_iterations=False, return_preds=False, scale_y=False, 
                 weight_strategy=None, add_cnt=False, add_loo=False, add_feat_cnt=False):
         X_df = X_df_in.copy()
         y_s = y_s_in.copy()

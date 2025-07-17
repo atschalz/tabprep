@@ -62,14 +62,6 @@ class CatTreatmentDetector(BasePreprocessor):
             self.metric = lambda y_true, y_pred: -log_loss(y_true, y_pred)  
 
         self.iterations = {}
-          
-    def get_freq_feature(self, x):
-        if x.name+"_freq" in self.freq_maps:
-            x_new = x.map(self.freq_maps[x.name])
-        else:
-            self.freq_maps[x.name] = x.value_counts().to_dict()
-            x_new = x.map(self.freq_maps[x.name])
-        return x_new
 
     def filter_candidates_by_distinctiveness(self, X):
             candidate_cols = []
@@ -83,30 +75,8 @@ class CatTreatmentDetector(BasePreprocessor):
             return candidate_cols
 
     def adapt_for_mvp_test(self, X_cand_in, test_cols, col=None, mode='forward'):
-        if col is None:
-            X_out = X_cand_in.copy()
-            # NOTE: 'backward' in full scenario should always correspond to using the raw data version.
-                # If features have been added they should be dropped, if nothing was changed, the raw data should be used.
-            if mode == 'backward': 
-                pass
-            elif mode == 'forward':
-                for col in test_cols:
-                    new_x = self.get_freq_feature(X_out[col])
-                    X_out[col+"_freq"] = new_x
-                
-        else:
-            X_out = X_cand_in.copy()
-            if mode == 'backward':
-                for col_use in test_cols:
-                    if col_use==col:
-                        continue
-                    new_x = self.get_freq_feature(X_out[col_use])
-                    X_out[col_use+"_freq"] = new_x
-            elif mode == 'forward':
-                new_x = self.get_freq_feature(X_out[col])
-                X_out[col+"_freq"] = new_x
-
-        return X_out
+        # TODO
+        pass
 
 
     def fit(self, X_input, y_input):
