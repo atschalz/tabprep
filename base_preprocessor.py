@@ -54,6 +54,14 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         self.significances = {}
         self.times = {}
 
+    def adjust_target_format(self, y):
+        if self.target_type in ["binary", "multiclass"]:
+            y = (y==y.value_counts().index[0]).astype(int)        
+        else:
+            y = y.astype(float)
+        
+        return y
+
     def get_dummy_mean_scores(self, X, y):
         X_use = X.copy()
 

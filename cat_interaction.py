@@ -284,11 +284,14 @@ class CategoricalInteractionDetector(BasePreprocessor):
         rejected_cols = set(test_cols) - set(self.new_col_set)
         return X_cand_in.drop(rejected_cols,axis=1)
 
-    def fit(self, X_in, y=None):
+    def fit(self, X_in, y_in=None):
         # TODO: Add logic to filter correlated new features early on
         # TODO: Add three different execution modes: sequential independent, sequential with performant subset, and sequential with lower order as new features
         # TODO: Add leave-one-out test to get rid of trivial features
         X = X_in.copy()
+        y = y_in.copy()
+
+        y = self.adjust_target_format(y)
 
         print(f"Removing {X.shape[1] - X.loc[:, X.nunique() > self.min_cardinality].shape[1]} low cardinality features with less than {self.min_cardinality} unique values")
         X = X.loc[:, X.nunique() > self.min_cardinality]  # Remove low cardinality features
