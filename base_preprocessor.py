@@ -4,9 +4,12 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.pipeline import Pipeline
 from utils import make_cv_function
-from proxy_models import TargetMeanClassifier, TargetMeanRegressor
+from proxy_models import TargetMeanClassifier, TargetMeanRegressor, UnivariateLinearRegressor, UnivariateLogisticClassifier, PolynomialRegressor, PolynomialLogisticClassifier, \
+    LightGBMBinner, KMeansBinner
 import lightgbm as lgb
 from utils import clean_feature_names
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import QuantileTransformer
 
 class BasePreprocessor(TransformerMixin, BaseEstimator):
     def __init__(self, target_type,
@@ -73,7 +76,70 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
             self.significances[col]["test_irrelevant_mean"] = self.significance_test(
                 self.scores[col]["mean"] - self.scores[col]["dummy"]
             )
-        
+
+    def single_interpolation_test(
+            self,
+            x, y, 
+            interpolation_method='linear',
+    ):        
+        if not x.dtype in ["int", "float", "bool"]:
+            x = pd.to_numeric(x, errors='coerce')
+
+        if interpolation_method == 'linear':
+            interpol_model = UnivariateLogisticClassifier() if self.target_type == "binary" else UnivariateLinearRegressor()
+        elif interpolation_method in [f'poly{d}' for d in range(2, 100)]:
+            degree = int(interpolation_method[4:])
+            interpol_model = PolynomialLogisticClassifier(degree=degree) if self.target_type == "binary" else PolynomialRegressor(degree=degree)
+        else:
+            raise ValueError(f"Unsupported interpolation method: {interpolation_method}")
+
+        pipe = Pipeline([
+            # PowerTransformer removes a few more features to be numeric than standaradscaler, mostly the very imbalanced ones
+            # ("standardize", PowerTransformer(method='yeo-johnson', standardize=True, )),
+            ("standardize", QuantileTransformer(n_quantiles=np.min([1000, int(x.shape[0]*(1-(1/self.n_folds)))]), random_state=42)),
+            ("impute", SimpleImputer(strategy="median")),
+            # ("standardize", StandardScaler()),
+            ("model", interpol_model)
+        ])
+
+        return self.cv_func(x.to_frame(), y, pipe)
+    
+    def single_combination_test(
+            self,
+            x, y, 
+            max_bin=255,
+            binning_strategy='lgb',  # 'lgb', 'KMeans', 'DT'
+    ):        
+        if not x.dtype in ["int", "float", "bool"]:
+            x = pd.to_numeric(x, errors='coerce')
+
+        if binning_strategy == 'lgb':
+            pipe = Pipeline([
+                ("binning", LightGBMBinner(max_bin=max_bin)),
+                ("model", TargetMeanClassifier() if self.target_type == "binary" else TargetMeanRegressor())
+            ])
+        elif binning_strategy == 'KMeans':
+            pipe = Pipeline([
+                ("binning", KMeansBinner(max_bin=max_bin)),
+                ("model", TargetMeanClassifier() if self.target_type == "binary" else TargetMeanRegressor())
+            ])
+        elif binning_strategy == 'DT':
+            if self.target_type == "regression":
+                from sklearn.tree import DecisionTreeRegressor as tree_binner
+            else:
+                from sklearn.tree import DecisionTreeClassifier as tree_binner
+            pipe = Pipeline([
+                ("model", tree_binner(
+                    max_leaf_nodes = max_bin,     # desired number of bins
+                    min_samples_leaf = 1,   # min pts per bin to avoid overfitting
+                    # criterion = "entropy"   # or "gini"
+                ))
+            ])
+        else:
+            raise ValueError(f"Unsupported binning strategy: {binning_strategy}. Use 'lgb', 'KMeans' or 'DT'.")            
+
+        return self.cv_func(x.to_frame(), y, pipe)
+
     def adapt_for_mvp_test(self, X_cand_in, test_cols, col=None, mode='forward'):
         if col is None:
             X_out = X_cand_in.copy()
@@ -226,7 +292,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
             if self.verbose:
                 print(f"\r{len(accepted_cols)}/{len(test_cols)} candidate columns are accepted.")
         elif selection_mode == 'backward': # backward indicates that the candidate significantly improved
-            accepted_cols.append(col)
+            accepted_cols.append(test_cols[0])
         
         return accepted_cols
 
