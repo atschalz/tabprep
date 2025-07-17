@@ -1402,9 +1402,10 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
     else:   
         raise ValueError("target_type must be 'binary' or 'regression'")
 
-    def cv_func(X_df, y_s, pipeline, return_iterations=False, scale_y=False):
+    def cv_func(X_df, y_s, pipeline, return_iterations=False, return_preds=False, scale_y=False):
         scores = []
         iterations = []
+        all_preds = []
         for train_idx, test_idx in cv.split(X_df, y_s, groups=groups):
             X_tr, y_tr = X_df.iloc[train_idx], y_s.iloc[train_idx]
             X_te, y_te = X_df.iloc[test_idx], y_s.iloc[test_idx]
@@ -1450,12 +1451,20 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                 scores.append({col: scorer(y_te, preds[:,num]) for num, col in enumerate(X_df.columns)})
             else:
                 scores.append(scorer(y_te, preds))
+            
+            if return_preds:
+                all_preds.append(pd.Series(preds, name=y_te.name, index=y_te.index))
 
             if isinstance(final_model, (lgb.LGBMClassifier, lgb.LGBMRegressor)):
                 iterations.append(pipeline.named_steps['model'].booster_.num_trees())
 
-        if return_iterations:
+        # TODO: Might change to return a dict instead
+        if return_iterations and return_preds:
+            return np.array(scores), iterations, all_preds
+        elif return_iterations and not return_preds:
             return np.array(scores), iterations
+        elif return_preds and not return_iterations:
+            return np.array(scores), all_preds
         else:
             return np.array(scores)
 
