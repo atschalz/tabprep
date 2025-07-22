@@ -103,18 +103,20 @@ class CatFreqDetector(BasePreprocessor):
         candidate_cols = self.filter_candidates_by_distinctiveness(X[cat_cols])
 
         if len(candidate_cols) > 0:
-            self.multivariate_performance_test(X, y_input, candidate_cols, suffix="ADDFREQ")
+            self.new_cols = self.multivariate_performance_test(X, y_input, candidate_cols, suffix="ADDFREQ")
             self.detection_attempted = True
         else:
             self.detection_attempted = False
 
         return self
 
-    # def transform(self, X):
-    #     if len(self.irrelevant_features)==0:
-    #         return X
+    def transform(self, X):
+        X_out = X.copy()
+        if self.detection_attempted:
+            for col in self.new_cols:
+                X_out[col+"_freq"] = self.get_freq_feature(X_out[col])
 
-    #     return X.drop(self.irrelevant_features, axis=1)
+        return X_out
 
 if __name__ == "__main__":
     from ft_detection import clean_feature_names
