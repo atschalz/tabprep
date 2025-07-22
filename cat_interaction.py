@@ -19,10 +19,11 @@ class CategoricalInteractionDetector(BasePreprocessor):
     def __init__(self, 
                  target_type, 
                  n_folds=5, alpha=0.1, significance_method='wilcoxon', mvp_criterion='significance', mvp_max_cols_use=100, random_state=42, verbose=True,
-                 execution_mode='independent', # ['independent', 'reduce', 'expand']
+                 execution_mode='independent', # ['independent', 'reduce', 'expand', 'all]
                  max_order=2, num_operations='all',
                  scores: dict = None, 
                  min_cardinality=6,
+                 use_mvp=True,
                  ):
         super().__init__(target_type=target_type, n_folds=n_folds, alpha=alpha, significance_method=significance_method, mvp_criterion=mvp_criterion, mvp_max_cols_use=mvp_max_cols_use, random_state=random_state, verbose=verbose)
         self.execution_mode = execution_mode
@@ -30,7 +31,8 @@ class CategoricalInteractionDetector(BasePreprocessor):
         self.num_operations = num_operations
         self.scores = scores
         self.min_cardinality = min_cardinality
-        
+        self.use_mvp = use_mvp
+
         if self.target_type=='regression':
             self.target_model = TargetMeanRegressor()
         else:
@@ -308,15 +310,20 @@ class CategoricalInteractionDetector(BasePreprocessor):
             X_new = self.find_interactions_independent(X, y)
         elif self.execution_mode == "reduce":
             X_new = self.find_interactions_reduce(X, y)
+        elif self.execution_mode == "all":
+            X_new = self.combine(X, order=self.max_order, num_operations=self.num_operations)
+            self.new_col_set = list(set(X_new.columns)-set(X.columns))
         else:
             raise ValueError(f"Unknown execution mode: {self.execution_mode}. Use 'sequential' or 'independent'.")
         
-        X_new = self.multivariate_performance_test(X_new, y, test_cols=self.new_col_set, max_cols_use=self.mvp_max_cols_use)
+        if self.use_mvp:
+            X_new = self.multivariate_performance_test(X_new, y, test_cols=self.new_col_set, max_cols_use=self.mvp_max_cols_use)
         
         return self
     
     def transform(self, X_in):        
         X = X_in.copy()
+        # TODO: FIx dtype assignment as that should not be necessary
         X = X.astype('U')
 
         X_out = X.copy()
