@@ -24,11 +24,11 @@ if __name__ == '__main__':
 
 
     if benchmark == "TabZilla":
-        from utils import get_benchmark_dataIDs, get_metadata_df
+        from tabprep.tabprep.utils import get_benchmark_dataIDs, get_metadata_df
         tids, dids = get_benchmark_dataIDs("TabZilla")  
         task_metadata = get_metadata_df(tids, dids)    
     elif benchmark == "Grinsztajn":
-        from utils import get_benchmark_dataIDs, get_metadata_df
+        from tabprep.tabprep.utils import get_benchmark_dataIDs, get_metadata_df
         tids, dids = get_benchmark_dataIDs("Grinsztajn")  
         task_metadata = get_metadata_df(tids, dids)    
     elif benchmark == "TabArena":

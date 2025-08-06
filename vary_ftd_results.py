@@ -1,7 +1,7 @@
 import openml
 import pandas as pd
 import numpy as np
-from utils import TargetMeanRegressor, UnivariateLinearRegressor, UnivariateLogisticClassifier, get_benchmark_dataIDs
+from tabprep.tabprep.utils import TargetMeanRegressor, UnivariateLinearRegressor, UnivariateLogisticClassifier, get_benchmark_dataIDs
 import pickle
 import os
 import pickle
