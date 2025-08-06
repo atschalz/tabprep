@@ -16,6 +16,7 @@ from tabprep.base_preprocessor import BasePreprocessor
 
 from tabprep.preprocessors import TargetRepresenter, FreqAdder, CatIntAdder, CatGroupByAdder
 from tabprep.num_interaction import NumericalInteractionDetector
+from tabprep.groupby_interactions import GroupByFeatureEngineer
 from autogluon.features.generators.drop_duplicates import DropDuplicatesFeatureGenerator
 
 class AllInOneEngineer(BasePreprocessor):
@@ -339,8 +340,45 @@ class AllInOneEngineer(BasePreprocessor):
                             **prep_args[best_order]
                         ).fit(X, y)
                         )
+        
+        # 6. Cat-by-NUM GroupBy interactions
+        if 'groupby' in self.engineering_techniques:
+            lgb_model_use = 'default'
+            if len(X_cat.columns) > 0 and any(X_cat.nunique() > 5) and len(X_num.columns) > 0 and any(X_num.nunique() > 5): # TODO: Test to filter low-cardinality for groupby
+                if f'lgb-{lgb_model_use}' not in self.scores['full']:
+                    self.scores['full'][f'lgb-{lgb_model_use}'], full_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=lgb_model_use)
+                if self.use_residuals:
+                    residuals = y-pd.concat(full_preds).sort_index()
+                
+                prep_params = {
+                    'target_type': self.target_type,
+                    'min_cardinality': 6,
+                    'use_mvp': False,
+                    'mean_difference': True,
+                    'num_as_cat': False,
+                }
+
+                preprocessor = GroupByFeatureEngineer(
+                    **prep_params
+                )
+
+                self.scores[f'groupby'] = {}
+                if self.use_residuals:
+                    self.scores[f'groupby'][f'lgb-{lgb_model_use}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[preprocessor], lgb_model_type=lgb_model_use, residuals=residuals)
+                    if target_type != 'regression':
+                        self.scores[f'groupby'][f'lgb-{lgb_model_use}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in int_preds])                    
+                else:
+                    self.scores[f'groupby'][f'lgb-{lgb_model_use}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[preprocessor], lgb_model_type=lgb_model_use)
+
+                if np.mean(self.scores[f'groupby'][f'lgb-{lgb_model_use}']) > np.mean(self.scores['full'][f'lgb-{lgb_model_use}']):
+                    self.transformers.append(GroupByFeatureEngineer(**prep_params).fit(X, y))
+                    print("!")
+        
         print("!")
 
+        # TODO: Add rank, min, max to GroupBy interactions
+        # TODO: Add technique to generate few but higher-order feature interactions
+        # TODO: Add technique to find binary interactions
 
         # EXP rounded_regression
         # if 'round_reg' in self.engineering_techniques:
@@ -1242,7 +1280,7 @@ if __name__ == "__main__":
             detector = AllInOneEngineer(        
                 target_type=target_type,
                 # engineering_techniques=['drop_irrelevant', 'cat_freq', 'cat_int', 'cat_groupby', 'num_int']
-                engineering_techniques=['num_int'],
+                engineering_techniques=['groupby'],
                 use_residuals=False,
                                         )
 
