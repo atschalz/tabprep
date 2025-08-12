@@ -1,7 +1,10 @@
+from __future__ import annotations
+from typing import List, Dict
+
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sklearn.preprocessing import MinMaxScaler, StandardScaler, PowerTransformer, QuantileTransformer
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, PowerTransformer, QuantileTransformer, OrdinalEncoder, OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -18,6 +21,7 @@ from itertools import combinations
 import pandas as pd
 from scipy.stats import chi2_contingency
 from autogluon.features.generators.drop_duplicates import DropDuplicatesFeatureGenerator
+from collections import Counter
 
 def cramers_v_matrix(df):
     """
@@ -341,11 +345,13 @@ class CatIntAdder(BasePreprocessor):
 class CatGroupByAdder(BaseEstimator, TransformerMixin):
     def __init__(self, 
         candidate_cols=None,
-        max_order = 2, num_operations='all', fillna=0):
+        max_order = 2, num_operations='all', fillna=0,
+       min_cardinality=6):
         self.candidate_cols = candidate_cols
         self.max_order = max_order
         self.num_operations = num_operations
         self.fillna = fillna
+        self.min_cardinality = min_cardinality
 
     def groupby(self, X_in, order=2, num_operations='all', seed=42, **kwargs):
         # TODO: Implement as matrix operations to speed up the process
@@ -411,7 +417,7 @@ class CatGroupByAdder(BaseEstimator, TransformerMixin):
         
         if self.candidate_cols is None:
             self.candidate_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
-            self.candidate_cols = [i for i in self.candidate_cols if X[i].nunique() > 5]  # TODO: Make this a parameter
+            self.candidate_cols = [i for i in self.candidate_cols if X[i].nunique() >= self.min_cardinality]
 
         X_new = self.groupby(X[self.candidate_cols], order=self.max_order, num_operations=self.num_operations)
 
@@ -471,3 +477,1233 @@ class CategoricalDtypeAssigner(BaseEstimator, TransformerMixin):
                 X[col] = X[col].astype(str).astype(cat_dtype)
 
         return X
+
+import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
+
+class CustomOneHotEncoder(BaseEstimator, TransformerMixin):
+    def __init__(self, columns=None, drop=None):
+        """
+        Parameters:
+        -----------
+        columns : list or None
+            List of categorical column names to encode. 
+            If None, all columns of type 'object' or 'category' will be encoded.
+        drop : str or None
+            If 'first', drop the first category to avoid collinearity.
+        """
+        self.columns = columns
+        self.drop = drop
+        self.categories_ = {}
+    
+    def fit(self, X, y=None):
+        X = self._validate_input(X)
+        if self.columns is None:
+            self.columns = X.select_dtypes(include=['object', 'category']).columns.tolist()
+        for col in self.columns:
+            self.categories_[col] = X[col].astype('category').cat.categories.tolist()
+        return self
+
+    def transform(self, X):
+        X = self._validate_input(X)
+        X_transformed = X.copy()
+        for col in self.columns:
+            dummies = pd.get_dummies(X_transformed[col], prefix=col)
+            if self.drop == 'first':
+                dummies = dummies.iloc[:, 1:]
+            X_transformed = X_transformed.drop(col, axis=1)
+            X_transformed = pd.concat([X_transformed, dummies], axis=1)
+        return clean_feature_names(X_transformed)
+
+    def _validate_input(self, X):
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
+        elif not isinstance(X, pd.DataFrame):
+            raise ValueError("Input must be a pandas DataFrame or numpy ndarray.")
+        return X
+
+import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
+
+class CustomOrdinalEncoder(BaseEstimator, TransformerMixin):
+    def __init__(self, columns=None, categories='auto', handle_unknown='error'):
+        """
+        Parameters:
+        -----------
+        columns : list or None
+            List of categorical column names to encode. If None, auto-detect.
+        categories : 'auto' or dict
+            If 'auto', categories are inferred from training data.
+            If dict, should map column names to list of categories.
+        handle_unknown : str
+            'error' (raise error on unknown category) or 'use_nan' (assign NaN).
+        """
+        self.columns = columns
+        self.categories = categories
+        self.handle_unknown = handle_unknown
+        self.category_maps_ = {}
+
+    def fit(self, X, y=None):
+        X = self._validate_input(X)
+
+        if self.columns is None:
+            self.columns = X.select_dtypes(include=['object', 'category']).columns.tolist()
+
+        for col in self.columns:
+            if isinstance(self.categories, dict) and col in self.categories:
+                categories = self.categories[col]
+            else:
+                categories = X[col].astype('category').cat.categories.tolist()
+
+            self.category_maps_[col] = {cat: i for i, cat in enumerate(categories)}
+
+        return self
+
+    def transform(self, X):
+        X = self._validate_input(X)
+        X_transformed = X.copy()
+
+        for col in self.columns:
+            mapping = self.category_maps_.get(col, {})
+            if self.handle_unknown == 'error':
+                unknowns = set(X_transformed[col]) - set(mapping.keys())
+                if unknowns:
+                    raise ValueError(f"Unknown categories {unknowns} found in column '{col}' during transform.")
+            X_transformed[col] = X_transformed[col].map(mapping)
+            if self.handle_unknown == 'use_nan':
+                X_transformed[col] = X_transformed[col].astype('float')  # NaN is float
+        return X_transformed
+
+    def _validate_input(self, X):
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
+        elif not isinstance(X, pd.DataFrame):
+            raise ValueError("Input must be a pandas DataFrame or numpy ndarray.")
+        return X
+
+
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import TruncatedSVD
+import numpy as np
+
+class SVDConcatTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, random_state=42):
+        self.random_state = random_state
+        self.scaler = StandardScaler()
+        self.svd = None  # will be initialized in fit
+
+    def fit(self, X_in, y=None):
+        X = X_in.copy()
+        self.cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+        self.ordinal_encoder = OrdinalEncoder(handle_unknown='use_encoded_value',
+                                              unknown_value=-1)
+        X[self.cat_cols] = self.ordinal_encoder.fit_transform(X[self.cat_cols])
+        X_scaled = self.scaler.fit_transform(X)
+
+        self.nan_filler = SimpleImputer(strategy='mean')
+        X_scaled = self.nan_filler.fit_transform(X_scaled)
+
+
+        n_components = max(
+            1,
+            min(
+                int(X.shape[0] * 0.8) // 10 + 1,
+                X.shape[1] // 2,
+            ),
+        )
+        
+        self.svd = TruncatedSVD(
+            algorithm="arpack",
+            n_components=n_components,
+            random_state=self.random_state,
+        )
+        self.svd.fit(X_scaled)
+        return self
+
+    def transform(self, X_in):
+        X = X_in.copy()
+        X[self.cat_cols] = self.ordinal_encoder.transform(X[self.cat_cols])
+        X_scaled = self.scaler.transform(X)
+        X_scaled = self.nan_filler.transform(X_scaled)
+        X_svd = pd.DataFrame(self.svd.transform(X_scaled), index=X.index)
+        X_svd.columns = [f"svd_{i}" for i in range(X_svd.shape[1])]
+        return pd.concat([X_in, X_svd], axis=1)
+
+class CatAsNumTransformer(BaseEstimator, TransformerMixin):
+    """
+    Convert object/category columns:
+      - If a column's non-null values are all numeric-like, cast it with pd.to_numeric.
+      - Otherwise, apply an OrdinalEncoder (per-column) to map categories to integers.
+
+    Parameters
+    ----------
+    handle_unknown : {"use_encoded_value", "error"}, default="use_encoded_value"
+        Passed to each internal OrdinalEncoder.
+    unknown_value : int or float, default=-1
+        Value to use for unknown categories when handle_unknown="use_encoded_value".
+    dtype : numpy dtype, default=np.float64
+        Output dtype for numeric-like conversions and encoded columns.
+    """
+    def __init__(
+        self,
+        handle_unknown: str = "use_encoded_value",
+        unknown_value: float | int = -1,
+        dtype=np.float64,
+    ):
+        self.handle_unknown = handle_unknown
+        self.unknown_value = unknown_value
+        self.dtype = dtype
+
+    def fit(self, X: pd.DataFrame, y=None):
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("CatAsNumTransformer expects a pandas DataFrame input.")
+
+        self.input_columns_: List[str] = list(X.columns)
+
+        obj_cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
+        self.numeric_like_cols_: List[str] = []
+        self.ordinal_cols_: List[str] = []
+        self.encoders_: Dict[str, OrdinalEncoder] = {}
+
+        # Decide column-by-column and fit encoders where needed
+        for col in obj_cat_cols:
+            s = X[col]
+            # Determine if all non-null values can be parsed as numbers
+            non_null = s.dropna()
+            num_convertible = pd.to_numeric(non_null, errors="coerce").notna().all()
+
+            if num_convertible:
+                self.numeric_like_cols_.append(col)
+            else:
+                self.ordinal_cols_.append(col)
+                enc = OrdinalEncoder(
+                    handle_unknown=self.handle_unknown,
+                    unknown_value=self.unknown_value,
+                    dtype=self.dtype,
+                )
+                # Fit on a 2D array
+                enc.fit(s.astype("category").to_frame())
+                self.encoders_[col] = enc
+
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("CatAsNumTransformer expects a pandas DataFrame input.")
+
+        # Keep original order/columns
+        X_out = X.copy()
+
+        # 1) Cast numeric-like string/category columns
+        for col in self.numeric_like_cols_:
+            if col in X_out.columns:
+                X_out[col] = pd.to_numeric(X_out[col], errors="coerce").astype(self.dtype)
+
+        # 2) Ordinal-encode the remaining categorical columns (per-column encoders)
+        for col in self.ordinal_cols_:
+            if col in X_out.columns:
+                enc = self.encoders_[col]
+                # transform expects 2D
+                X_out[col] = enc.transform(X_out[[col]]).astype(self.dtype).ravel()
+
+        return X_out
+
+    # Feature names are unchanged (one-in/one-out)
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        if input_features is None:
+            input_features = getattr(self, "input_columns_", None)
+        if input_features is None:
+            raise ValueError("Call fit before get_feature_names_out, or pass input_features.")
+        return np.array(input_features, dtype=object)
+
+
+import numpy as np
+import pandas as pd
+from typing import List, Dict, Any
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.preprocessing import OneHotEncoder
+from pandas.api.types import is_categorical_dtype
+
+class CatOHETransformer(BaseEstimator, TransformerMixin):
+    def __init__(
+        self,
+        handle_unknown: str = "ignore",
+        sparse: bool = False,
+        dtype=np.float64,
+        min_frequency: int = 2
+    ):
+        self.handle_unknown = handle_unknown
+        self.sparse = sparse
+        self.dtype = dtype
+        self.min_frequency = int(min_frequency)
+
+    # --- helpers ---
+    def _ensure_tokens(self, s: pd.Series) -> pd.Series:
+        """If categorical, add 'infrequent' and 'missing' categories before assignment."""
+        if is_categorical_dtype(s):
+            needed = [t for t in ("infrequent", "missing") if t not in s.cat.categories]
+            if needed:
+                s = s.cat.add_categories(needed)
+        return s
+
+    def _build_infrequent_map(self, X: pd.DataFrame) -> Dict[str, set]:
+        infreq_map: Dict[str, set] = {}
+        for col in self.cat_cols_:
+            counts = X[col].value_counts(dropna=False)
+            # mark values with count < min_frequency as infrequent; skip NaN (handled separately)
+            infreq_map[col] = {v for v in counts.index if (not pd.isna(v)) and counts.loc[v] < self.min_frequency}
+        return infreq_map
+
+    def _apply_training_mapping(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Use TRAIN-time infrequent sets; NaN→'missing'; never recompute frequencies."""
+        X = X.copy()
+        for col in self.cat_cols_:
+            s = X[col]
+            s = self._ensure_tokens(s)
+            # infrequent (based on train)
+            if self.infrequent_values_[col]:
+                mask = s.isin(self.infrequent_values_[col])
+                # if s is object, .where works; if categorical, it's safe because tokens exist
+                s = s.where(~mask, other="infrequent")
+            # missing as its own category
+            s = s.fillna("missing")
+            X[col] = s
+        return X
+
+    # --- estimator API ---
+    def fit(self, X: pd.DataFrame, y: Any = None):
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("CatOHETransformer expects a pandas DataFrame input.")
+
+        self.input_columns_: List[str] = list(X.columns)
+        self.cat_cols_ = X.select_dtypes(include=["object", "category"]).columns.tolist()
+        self.non_cat_cols_ = [c for c in self.input_columns_ if c not in self.cat_cols_]
+
+        self.infrequent_values_ = self._build_infrequent_map(X)
+
+        X_cat_fit = self._apply_training_mapping(X[self.cat_cols_]) if self.cat_cols_ else pd.DataFrame(index=X.index)
+
+        # sklearn >=1.2 uses sparse_output; older uses sparse
+        try:
+            self.ohe_ = OneHotEncoder(
+                handle_unknown=self.handle_unknown,
+                sparse_output=self.sparse,
+                dtype=self.dtype
+            )
+        except TypeError:
+            self.ohe_ = OneHotEncoder(
+                handle_unknown=self.handle_unknown,
+                sparse=self.sparse,
+                dtype=self.dtype
+            )
+
+        if self.cat_cols_:
+            self.ohe_.fit(X_cat_fit)
+
+        return self
+
+    def transform(self, X: pd.DataFrame):
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("CatOHETransformer expects a pandas DataFrame input.")
+
+        if self.cat_cols_:
+            X_cat = self._apply_training_mapping(X[self.cat_cols_])
+            cat_encoded = self.ohe_.transform(X_cat)
+
+            non_cat_cols_present = [c for c in self.non_cat_cols_ if c in X.columns]
+            non_cat_df = X[non_cat_cols_present].copy()
+
+            if not self.sparse:
+                cat_df = pd.DataFrame(
+                    cat_encoded,
+                    columns=self.ohe_.get_feature_names_out(self.cat_cols_),
+                    index=X.index
+                )
+                try:
+                    cat_df = clean_feature_names(cat_df)  # if your helper exists
+                except NameError:
+                    pass
+                return pd.concat([non_cat_df, cat_df], axis=1)
+            else:
+                # return a sparse design matrix with non-cats prepended
+                from scipy import sparse as sp
+                non_cat_mat = sp.csr_matrix(non_cat_df.to_numpy())
+                return sp.hstack([non_cat_mat, cat_encoded], format="csr")
+
+        # no categorical columns
+        return X.copy()
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        if not hasattr(self, "ohe_"):
+            raise ValueError("Call fit before get_feature_names_out.")
+        if self.cat_cols_:
+            return np.array(
+                list(self.non_cat_cols_) + list(self.ohe_.get_feature_names_out(self.cat_cols_)),
+                dtype=object
+            )
+        return np.array(self.non_cat_cols_, dtype=object)
+
+class CatLOOTransformer(BaseEstimator, TransformerMixin):
+    """
+    Transform all object/category columns using Leave-One-Out encoding.
+    Keeps non-categorical columns unchanged and returns a pandas DataFrame.
+
+    Parameters
+    ----------
+    sigma : float, default=0.0
+        Standard deviation of Gaussian noise added to encoding.
+    random_state : int, optional
+        Random seed for noise.
+    """
+    def __init__(self, sigma: float = 0.0, random_state: int | None = None):
+        self.sigma = sigma
+        self.random_state = random_state
+
+    def fit(self, X: pd.DataFrame, y: pd.Series):
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("CatLOOTransformer expects a pandas DataFrame input.")
+        if y is None:
+            raise ValueError("Leave-One-Out encoding requires a target variable `y`.")
+
+        self.input_columns_: List[str] = list(X.columns)
+
+        # Identify categorical and non-categorical columns
+        self.cat_cols_ = X.select_dtypes(include=["object", "category"]).columns.tolist()
+        self.non_cat_cols_ = [col for col in X.columns if col not in self.cat_cols_]
+
+        # Fit Leave-One-Out encoder
+        self.loo_ = LeaveOneOutEncoder(
+            cols=self.cat_cols_,
+            sigma=self.sigma,
+            random_state=self.random_state
+        )
+        if self.cat_cols_:
+            self.loo_.fit(X[self.cat_cols_], y)
+
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("CatLOOTransformer expects a pandas DataFrame input.")
+
+        X_out = X.copy()
+
+        if self.cat_cols_:
+            cat_encoded = self.loo_.transform(X_out[self.cat_cols_])
+            # Keep column names from encoder
+            cat_encoded.columns = self.cat_cols_
+            # Combine with non-categorical columns
+            X_out = pd.concat([X_out[self.non_cat_cols_], cat_encoded], axis=1)
+
+        return X_out
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        if input_features is None:
+            input_features = getattr(self, "input_columns_", None)
+        if input_features is None:
+            raise ValueError("Call fit before get_feature_names_out, or pass input_features.")
+        return np.array(input_features, dtype=object)
+
+class DuplicateCountAdder(BaseEstimator, TransformerMixin):
+    """
+    A transformer that counts duplicate samples in the training set
+    and appends a new feature with those counts at transform time.
+    """
+
+    def __init__(self, feature_name: str = "duplicate_count", cap=False):
+        self.feature_name = feature_name
+        self.cap = cap
+
+    def fit(self, X_in, y=None):
+        """
+        Learn the duplicate‐count mapping from X.
+        
+        Parameters
+        ----------
+        X : array‐like or DataFrame, shape (n_samples, n_features)
+            Training data.
+
+        y : Ignored.
+        
+        Returns
+        -------
+        self
+        """
+        X = X_in.copy()
+        # If DataFrame, extract values but remember columns
+        if isinstance(X, pd.DataFrame):
+            self._is_df = True
+            self._columns_ = X.columns.tolist()
+            data = X.values
+        else:
+            self._is_df = False
+            data = np.asarray(X)
+        
+        # Convert each row into a hashable tuple and count
+        rows = [tuple(row) for row in data]
+        self.counts_ = Counter(rows)
+        return self
+
+    def transform(self, X_in):
+        """
+        Append the duplicate‐count feature to X.
+        
+        Parameters
+        ----------
+        X : array‐like or DataFrame, shape (n_samples, n_features)
+            New data to transform.
+        
+        Returns
+        -------
+        X_out : same type as X but with one extra column
+        """
+        X = X_in.copy()
+        # Prepare raw array and remember if DataFrame
+        if isinstance(X, pd.DataFrame):
+            cols = X.columns.tolist()
+            data = X.values
+        else:
+            data = np.asarray(X)
+        
+        # Look up counts (0 if unseen)
+        new_feat = pd.Series([self.counts_.get(tuple(row), 0) for row in data], index=X.index, name=self.feature_name)
+        
+        if self.cap:
+            new_feat = new_feat.clip(upper=1)
+
+        out = pd.concat([X, new_feat], axis=1)
+        return out
+
+
+from typing import Optional, Sequence, Union
+import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
+
+class DuplicateContentLOOEncoder(BaseEstimator, TransformerMixin):
+    def __init__(
+        self, new_name='LOO_duplicates'
+    ):
+        self.new_col = new_name
+
+    def fit(self, X, y):
+        X_str = X.astype(str).sum(axis=1)
+
+        self.u_id_map = {i:j for i,j in zip(X_str.unique(),list(range(X_str.nunique())))}
+
+        x_uid = X_str.map(self.u_id_map).astype(str)
+        self.loo = LeaveOneOutEncoder()
+        self.loo.fit(x_uid, y)
+
+        return self
+
+    def transform(self, X):
+        X_out = X.copy()
+        X_str = X.astype(str).sum(axis=1)
+        x_uid = X_str.map(self.u_id_map).astype(str)
+        X_out[self.new_col] = self.loo.transform(x_uid)
+        return X_out
+    
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any
+from inspect import signature
+
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge, Lasso, ElasticNet
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.utils.multiclass import type_of_target
+from sklearn.utils.validation import check_is_fitted
+
+@dataclass
+class _CatSpec:
+    frequent_values: set
+
+class LinearFeatureAdder(BaseEstimator, TransformerMixin):
+    """
+    Pandas in/out. Steps:
+      - Numeric: mean-impute + add {col}_missing indicator
+      - Categorical: bucket rare (<min_count) to rare_token; OHE
+      - Fit LinearRegression/LogisticRegression on encoded matrix
+      - Append prediction columns to X (and optionally append encoded features)
+
+    Parameters
+    ----------
+    model_params : dict
+    prefix : str
+    use_proba_for_classification : bool
+    min_count : int
+    rare_token : str
+    categorical_cols : list[str] or None
+    append_encoded : bool
+        If True, append encoded features (numeric imputed + indicators + OHE) to output.
+    """
+    def __init__(
+        self,
+        target_type: str,
+        linear_model_type: str = 'default',
+        model_params: Optional[Dict[str, Any]] = None,
+        prefix: str = "lin",
+        use_proba_for_classification: bool = True,
+        min_count: int = 5,
+        rare_token: str = "__OTHER__",
+        categorical_cols: Optional[List[str]] = None,
+        append_encoded: bool = False,
+        random_state: Optional[int] = 42
+    ):
+        self.target_type = target_type
+        self.linear_model_type = linear_model_type
+        self.model_params = model_params or {}
+        self.prefix = prefix
+        self.use_proba_for_classification = use_proba_for_classification
+        self.min_count = min_count
+        self.rare_token = rare_token
+        self.categorical_cols = categorical_cols
+        self.append_encoded = append_encoded
+        self.random_state = random_state
+
+
+        self.X_scaler = StandardScaler()
+        self.y_scaler = StandardScaler()
+
+        # TODO: Extend to Ridge/Lasso/ElasticNet
+        if self.linear_model_type == 'default':
+            if self.target_type == "regression":
+                self.model_ = LinearRegression(**self.model_params, random_state=self.random_state)
+            elif self.target_type in ("binary", "multiclass"):
+                self.model_ = LogisticRegression(penalty=None, solver='lbfgs', max_iter=1000, random_state=self.random_state)
+            else:
+                raise ValueError(f"Unsupported target type: {self.target_type}")
+        elif self.linear_model_type == 'lasso':
+            if self.target_type == "regression":
+                self.model_ = Lasso(**self.model_params, random_state=self.random_state)
+            elif self.target_type in ("binary", "multiclass"):
+                self.model_ = LogisticRegression(penalty='l1', C=1.0, solver='liblinear', max_iter=1000, random_state=self.random_state)
+            else:
+                raise ValueError(f"Unsupported target type: {self.target_type}")
+        elif self.linear_model_type == 'ridge':
+            if self.target_type == "regression":
+                self.model_ = Ridge(**self.model_params, random_state=self.random_state)
+            elif self.target_type in ("binary", "multiclass"):
+                self.model_ = LogisticRegression(penalty='l2', C=1.0, solver='lbfgs', max_iter=1000, random_state=self.random_state)
+            else:
+                raise ValueError(f"Unsupported target type: {self.target_type}")
+        elif self.linear_model_type == 'elasticnet':
+            if self.target_type == "regression":
+                self.model_ = ElasticNet(alpha=1.0, l1_ratio=0.5, random_state=self.random_state)
+            elif self.target_type in ("binary", "multiclass"):
+                self.model_ = LogisticRegression(penalty='elasticnet', l1_ratio=0.5,
+                             C=1.0, solver='saga', max_iter=1000, random_state=self.random_state)
+            else:
+                raise ValueError(f"Unsupported target type: {self.target_type}")
+        else:
+            raise ValueError(f"Unsupported linear model type: {self.linear_model_type}")
+
+    # ---------- Helpers ----------
+    def _ensure_df(self, X):
+        return X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+
+    def _ensure_series(self, y, index):
+        return y if isinstance(y, pd.Series) else pd.Series(y, index=index)
+
+    def _auto_cats(self, X: pd.DataFrame) -> List[str]:
+        cats = []
+        for c in X.columns:
+            dt = X[c].dtype
+            if (pd.api.types.is_object_dtype(dt)
+                or isinstance(dt, pd.CategoricalDtype)
+                or pd.api.types.is_bool_dtype(dt)):
+                cats.append(c)
+        if self.categorical_cols is not None:
+            cats = [c for c in self.categorical_cols if c in X.columns]
+        return cats
+
+    def _rare_map(self, s: pd.Series, spec: _CatSpec) -> pd.Series:
+        return s.where(s.isin(spec.frequent_values), other=self.rare_token).fillna(self.rare_token)
+
+    def _make_ohe(self):
+        # sklearn >=1.4 removed 'sparse' in favor of 'sparse_output'
+        params = signature(OneHotEncoder).parameters
+        if "sparse_output" in params:
+            return OneHotEncoder(handle_unknown="ignore", dtype=float, sparse_output=False)
+        else:
+            return OneHotEncoder(handle_unknown="ignore", dtype=float, sparse=False)
+
+    def _encode(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Build the design matrix used by the internal linear/logistic model."""
+        idx = X.index
+
+        # --- numeric: missing indicator + mean impute ---
+        if self.num_cols_:
+            # missing indicators from *current* X before imputation
+            miss_ind = X[self.num_cols_].isna().astype(int)
+            miss_ind.columns = [f"{c}_missing" for c in self.num_cols_]
+
+            # impute with training means
+            X_num = X[self.num_cols_].copy()
+            for c in self.num_cols_:
+                X_num[c] = X_num[c].astype("float64")
+                X_num[c] = X_num[c].fillna(self.num_impute_values_[c])
+        else:
+            miss_ind = pd.DataFrame(index=idx)
+            X_num = pd.DataFrame(index=idx)
+
+        # --- categoricals: rare-bucket + OHE ---
+        if self.cat_cols_:
+            mapped = pd.DataFrame({
+                c: self._rare_map(X[c].astype("object"), self.cat_specs_[c])
+                for c in self.cat_cols_
+            }, index=idx)
+            enc = self.ohe_.transform(mapped)
+            ohe_df = pd.DataFrame(enc, index=idx, columns=self.ohe_feature_names_) if enc.size else pd.DataFrame(index=idx)
+        else:
+            ohe_df = pd.DataFrame(index=idx)
+
+        # concat in stable order: numeric -> indicators -> ohe
+        X_enc = pd.concat([X_num, miss_ind, ohe_df], axis=1)
+        
+        return self.X_scaler.fit_transform(X_enc)
+
+    def _encode_unseen(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Build the design matrix used by the internal linear/logistic model."""
+        idx = X.index
+
+        # --- numeric: missing indicator + mean impute ---
+        if self.num_cols_:
+            # missing indicators from *current* X before imputation
+            miss_ind = X[self.num_cols_].isna().astype(int)
+            miss_ind.columns = [f"{c}_missing" for c in self.num_cols_]
+
+            # impute with training means
+            X_num = X[self.num_cols_].copy()
+            for c in self.num_cols_:
+                X_num[c] = X_num[c].astype("float64")
+                X_num[c] = X_num[c].fillna(self.num_impute_values_[c])
+        else:
+            miss_ind = pd.DataFrame(index=idx)
+            X_num = pd.DataFrame(index=idx)
+
+        # --- categoricals: rare-bucket + OHE ---
+        if self.cat_cols_:
+            mapped = pd.DataFrame({
+                c: self._rare_map(X[c].astype("object"), self.cat_specs_[c])
+                for c in self.cat_cols_
+            }, index=idx)
+            enc = self.ohe_.transform(mapped)
+            ohe_df = pd.DataFrame(enc, index=idx, columns=self.ohe_feature_names_) if enc.size else pd.DataFrame(index=idx)
+        else:
+            ohe_df = pd.DataFrame(index=idx)
+
+        # concat in stable order: numeric -> indicators -> ohe
+        X_enc = pd.concat([X_num, miss_ind, ohe_df], axis=1)
+        
+        return self.X_scaler.transform(X_enc)
+
+
+
+    # ---------- sklearn API ----------
+    def fit(self, X, y):
+        X = self._ensure_df(X)
+        y = self._ensure_series(y, index=X.index)
+
+        if self.target_type == "regression":
+            y = pd.Series(self.y_scaler.fit_transform(y.values.reshape(-1, 1)).ravel(), index=X.index, name=y.name)
+
+        self.feature_names_in_ = list(X.columns)
+        self.cat_cols_ = self._auto_cats(X)
+        self.num_cols_ = [c for c in X.columns if c not in self.cat_cols_]
+
+        # numeric means for imputation (computed on training set)
+        self.num_impute_values_ = {c: pd.to_numeric(X[c], errors="coerce").mean() for c in self.num_cols_}
+
+        # rare specs for categoricals
+        self.cat_specs_ = {}
+        for c in self.cat_cols_:
+            vc = pd.Series(X[c]).astype("object").value_counts(dropna=False)
+            frequent = set(vc[vc >= self.min_count].index)
+            self.cat_specs_[c] = _CatSpec(frequent_values=frequent)
+
+        # fit OHE on mapped categoricals
+        # TODO: Use ordinal-encoding for high-cardinality categoricals
+        if self.cat_cols_:
+            mapped = pd.DataFrame({
+                c: self._rare_map(pd.Series(X[c]).astype("object"), self.cat_specs_[c])
+                for c in self.cat_cols_
+            }, index=X.index)
+            self.ohe_ = self._make_ohe().fit(mapped)
+            self.ohe_feature_names_ = self.ohe_.get_feature_names_out(self.cat_cols_).tolist()
+        else:
+            self.ohe_ = None
+            self.ohe_feature_names_ = []
+
+        # names for encoded output (when append_encoded=True)
+        self.missing_indicator_names_ = [f"{c}_missing" for c in self.num_cols_]
+        self.encoded_feature_names_ = self.num_cols_ + self.missing_indicator_names_ + self.ohe_feature_names_
+
+        # design matrix & model
+        X_enc = self._encode(X)
+
+        self.model_.fit(X_enc, y)
+        if self.target_type in ("binary", "multiclass"):
+            self.classes_ = self.model_.classes_
+
+        return self
+
+    def transform(self, X):
+        X = self._ensure_df(X)
+
+        X_enc = self._encode_unseen(X)
+
+        # predictions
+        if self.target_type == "regression":
+            preds = self.model_.predict(X_enc)
+            add = pd.DataFrame({f"{self.prefix}_pred": preds}, index=X.index)
+
+        elif self.target_type == "binary":
+            if self.use_proba_for_classification:
+                pos_label = self.classes_[1] if len(self.classes_) >= 2 else self.classes_[0]
+                proba = self.model_.predict_proba(X_enc)[:, list(self.classes_).index(pos_label)]
+                add = pd.DataFrame({f"{self.prefix}_proba_{pos_label}": proba}, index=X.index)
+            else:
+                labels = self.model_.predict(X_enc)
+                add = pd.DataFrame({f"{self.prefix}_label": labels}, index=X.index)
+
+        elif self.target_type == "multiclass":
+            if self.use_proba_for_classification:
+                proba = self.model_.predict_proba(X_enc)
+                cols = [f"{self.prefix}_proba_{c}" for c in self.classes_]
+                add = pd.DataFrame(proba, index=X.index, columns=cols)
+            else:
+                labels = self.model_.predict(X_enc)
+                add = pd.DataFrame({f"{self.prefix}_label": labels}, index=X.index)
+        else:
+            raise ValueError(f"Unsupported target type: {self.target_type}")
+
+        if self.append_encoded:
+            enc_out = X_enc.copy()
+            enc_out.columns = self.encoded_feature_names_
+            return pd.concat([X, enc_out, add], axis=1)
+
+        return pd.concat([X, add], axis=1)
+
+    def get_feature_names_out(self, input_features=None):
+        base = self.feature_names_in_
+        if self.append_encoded:
+            base = base + self.encoded_feature_names_
+
+        if self.target_type == "continuous":
+            extra = [f"{self.prefix}_pred"]
+        elif self.target_type == "binary":
+            extra = ([f"{self.prefix}_label"] if not self.use_proba_for_classification
+                     else [f"{self.prefix}_proba_{self.classes_[1] if len(self.classes_)>=2 else self.classes_[0]}"])
+        else:
+            extra = ([f"{self.prefix}_label"] if not self.use_proba_for_classification
+                     else [f"{self.prefix}_proba_{c}" for c in self.classes_])
+
+        return np.array(base + extra)
+
+
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+import numpy as np
+import pandas as pd
+
+from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.linear_model import LinearRegression, LogisticRegression, Lasso, Ridge, ElasticNet
+from sklearn.model_selection import KFold, StratifiedKFold
+
+from inspect import signature
+
+@dataclass
+class _CatSpec:
+    frequent_values: set
+
+class OOFLinearFeatureAdder(BaseEstimator, TransformerMixin):
+    """
+    Pandas in/out. Steps:
+      - Numeric: mean-impute + add {col}_missing indicator
+      - Categorical: bucket rare (<min_count) to rare_token; OHE
+      - Fit linear/logistic models using K-fold CV; store OOF preds
+      - Append OOF preds on fit_transform; average-fold preds at transform
+      - (Optional) append encoded features
+
+    Parameters
+    ----------
+    target_type : {'regression','binary','multiclass'}
+    linear_model_type : {'default','lasso','ridge','elasticnet'}
+    model_params : dict
+    prefix : str
+    use_proba_for_classification : bool
+    min_count : int
+    rare_token : str
+    categorical_cols : list[str] or None
+    append_encoded : bool
+    n_splits : int
+    cv_shuffle : bool
+    cv_random_state : int | None
+    """
+    def __init__(
+        self,
+        target_type: str,
+        linear_model_type: str = 'default',
+        model_params: Optional[Dict[str, Any]] = None,
+        prefix: str = "lin",
+        use_proba_for_classification: bool = True,
+        min_count: int = 5,
+        rare_token: str = "__OTHER__",
+        categorical_cols: Optional[List[str]] = None,
+        append_encoded: bool = False,
+        n_splits: int = 5,
+        cv_shuffle: bool = True,
+        cv_random_state: Optional[int] = 42,
+    ):
+        self.target_type = target_type
+        self.linear_model_type = linear_model_type
+        self.model_params = model_params or {}
+        self.prefix = prefix
+        self.use_proba_for_classification = use_proba_for_classification
+        self.min_count = min_count
+        self.rare_token = rare_token
+        self.categorical_cols = categorical_cols
+        self.append_encoded = append_encoded
+        self.n_splits = n_splits
+        self.cv_shuffle = cv_shuffle
+        self.cv_random_state = cv_random_state
+
+        self.X_scaler = StandardScaler()
+        self.y_scaler = StandardScaler()
+
+        # set up a prototype model; actual folds will use clones
+        self.model_ = self._make_model()
+
+    # ---------- Helpers ----------
+    def _make_model(self):
+        if self.linear_model_type == 'default':
+            if self.target_type == "regression":
+                return LinearRegression(**self.model_params, random_state=self.cv_random_state)
+            elif self.target_type in ("binary", "multiclass"):
+                # penalty=None is only valid for some solvers/versions; keep simple/robust
+                return LogisticRegression(
+                    penalty='l2', solver='lbfgs', max_iter=1000, **self.model_params, random_state=self.cv_random_state
+                )
+            else:
+                raise ValueError(f"Unsupported target type: {self.target_type}")
+        elif self.linear_model_type == 'lasso':
+            if self.target_type == "regression":
+                return Lasso(**self.model_params, random_state=self.cv_random_state)
+            elif self.target_type in ("binary", "multiclass"):
+                return LogisticRegression(
+                    penalty='l1', C=1.0, solver='liblinear', max_iter=1000, **self.model_params, random_state=self.cv_random_state
+                )
+            else:
+                raise ValueError(f"Unsupported target type: {self.target_type}")
+        elif self.linear_model_type == 'ridge':
+            if self.target_type == "regression":
+                return Ridge(**self.model_params, random_state=self.cv_random_state)
+            elif self.target_type in ("binary", "multiclass"):
+                return LogisticRegression(
+                    penalty='l2', C=1.0, solver='lbfgs', max_iter=1000, **self.model_params, random_state=self.cv_random_state
+                )
+            else:
+                raise ValueError(f"Unsupported target type: {self.target_type}")
+        elif self.linear_model_type == 'elasticnet':
+            if self.target_type == "regression":
+                return ElasticNet(alpha=1.0, l1_ratio=0.5, **self.model_params, random_state=self.cv_random_state)
+            elif self.target_type in ("binary", "multiclass"):
+                return LogisticRegression(
+                    penalty='elasticnet', l1_ratio=0.5, C=1.0, solver='saga', max_iter=1000, **self.model_params, random_state=self.cv_random_state
+                )
+            else:
+                raise ValueError(f"Unsupported target type: {self.target_type}")
+        else:
+            raise ValueError(f"Unsupported linear model type: {self.linear_model_type}")
+
+    def _ensure_df(self, X):
+        return X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+
+    def _ensure_series(self, y, index):
+        return y if isinstance(y, pd.Series) else pd.Series(y, index=index)
+
+    def _auto_cats(self, X: pd.DataFrame) -> List[str]:
+        cats = []
+        for c in X.columns:
+            dt = X[c].dtype
+            if (pd.api.types.is_object_dtype(dt)
+                or isinstance(dt, pd.CategoricalDtype)
+                or pd.api.types.is_bool_dtype(dt)):
+                cats.append(c)
+        if self.categorical_cols is not None:
+            cats = [c for c in self.categorical_cols if c in X.columns]
+        return cats
+
+    def _rare_map(self, s: pd.Series, spec: _CatSpec) -> pd.Series:
+        return s.where(s.isin(spec.frequent_values), other=self.rare_token).fillna(self.rare_token)
+
+    def _make_ohe(self):
+        params = signature(OneHotEncoder).parameters
+        if "sparse_output" in params:
+            return OneHotEncoder(handle_unknown="ignore", dtype=float, sparse_output=False)
+        else:
+            return OneHotEncoder(handle_unknown="ignore", dtype=float, sparse=False)
+
+    def _encode_raw(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Build raw (unscaled) design matrix used by the internal models."""
+        idx = X.index
+
+        # --- numeric: missing indicator + mean impute ---
+        if self.num_cols_:
+            miss_ind = X[self.num_cols_].isna().astype(int)
+            miss_ind.columns = [f"{c}_missing" for c in self.num_cols_]
+
+            X_num = X[self.num_cols_].copy()
+            for c in self.num_cols_:
+                X_num[c] = pd.to_numeric(X_num[c], errors="coerce")
+                X_num[c] = X_num[c].fillna(self.num_impute_values_[c])
+        else:
+            miss_ind = pd.DataFrame(index=idx)
+            X_num = pd.DataFrame(index=idx)
+
+        # --- categoricals: rare-bucket + OHE ---
+        if self.cat_cols_:
+            mapped = pd.DataFrame({
+                c: self._rare_map(X[c].astype("object"), self.cat_specs_[c])
+                for c in self.cat_cols_
+            }, index=idx)
+            enc = self.ohe_.transform(mapped)
+            ohe_df = pd.DataFrame(enc, index=idx, columns=self.ohe_feature_names_) if enc.size else pd.DataFrame(index=idx)
+        else:
+            ohe_df = pd.DataFrame(index=idx)
+
+        # concat in stable order: numeric -> indicators -> ohe
+        X_enc = pd.concat([X_num, miss_ind, ohe_df], axis=1)
+        return X_enc
+
+    def _scale(self, Xdf: pd.DataFrame, fit: bool = False) -> pd.DataFrame:
+        if fit:
+            arr = self.X_scaler.fit_transform(Xdf.values)
+        else:
+            arr = self.X_scaler.transform(Xdf.values)
+        return pd.DataFrame(arr, index=Xdf.index, columns=Xdf.columns)
+
+    # ---------- sklearn API ----------
+    def fit(self, X, y):
+        X = self._ensure_df(X)
+        y = self._ensure_series(y, index=X.index)
+
+        if self.target_type == "regression":
+            y = pd.Series(self.y_scaler.fit_transform(y.values.reshape(-1, 1)).ravel(), index=X.index, name=y.name)
+
+        self.feature_names_in_ = list(X.columns)
+        self.cat_cols_ = self._auto_cats(X)
+        self.num_cols_ = [c for c in X.columns if c not in self.cat_cols_]
+
+        # numeric means for imputation (computed on training set)
+        self.num_impute_values_ = {c: pd.to_numeric(X[c], errors="coerce").mean() for c in self.num_cols_}
+
+        # rare specs for categoricals
+        self.cat_specs_ = {}
+        for c in self.cat_cols_:
+            vc = pd.Series(X[c]).astype("object").value_counts(dropna=False)
+            frequent = set(vc[vc >= self.min_count].index)
+            self.cat_specs_[c] = _CatSpec(frequent_values=frequent)
+
+        # fit OHE on mapped categoricals
+        if self.cat_cols_:
+            mapped = pd.DataFrame({
+                c: self._rare_map(pd.Series(X[c]).astype("object"), self.cat_specs_[c])
+                for c in self.cat_cols_
+            }, index=X.index)
+            self.ohe_ = self._make_ohe().fit(mapped)
+            self.ohe_feature_names_ = self.ohe_.get_feature_names_out(self.cat_cols_).tolist()
+        else:
+            self.ohe_ = None
+            self.ohe_feature_names_ = []
+
+        # names for encoded output (when append_encoded=True)
+        self.missing_indicator_names_ = [f"{c}_missing" for c in self.num_cols_]
+        self.encoded_feature_names_ = self.num_cols_ + self.missing_indicator_names_ + self.ohe_feature_names_
+
+        # raw encode + fit scaler once
+        X_raw = self._encode_raw(X)
+        X_enc = self._scale(X_raw, fit=True)
+
+        # set up CV splitter
+        if self.target_type == "regression":
+            splitter = KFold(n_splits=self.n_splits, shuffle=self.cv_shuffle, random_state=self.cv_random_state)
+        else:
+            splitter = StratifiedKFold(n_splits=self.n_splits, shuffle=self.cv_shuffle, random_state=self.cv_random_state)
+
+        n = len(X)
+        self.models_ = []
+        self.classes_ = None
+
+        # allocate OOF container
+        if self.target_type == "regression":
+            oof = np.zeros(n, dtype=float)
+        elif self.target_type == "binary":
+            oof = np.zeros(n, dtype=float) if self.use_proba_for_classification else np.empty(n, dtype=object)
+        else:  # multiclass
+            # We'll get classes_ after first fold fit; temporarily defer shape
+            oof = None
+
+        for fold, (tr_idx, va_idx) in enumerate(splitter.split(X_enc, y if self.target_type=="regression" else y.astype(str))):
+            model = clone(self._make_model())
+            X_tr, X_va = X_enc.iloc[tr_idx], X_enc.iloc[va_idx]
+            y_tr = y.iloc[tr_idx]
+
+            model.fit(X_tr, y_tr)
+            self.models_.append(model)
+
+            # Establish classes_ and oof shape for multiclass on first fold
+            if self.target_type in ("binary","multiclass") and self.classes_ is None:
+                self.classes_ = model.classes_
+                if self.target_type == "multiclass":
+                    oof = np.zeros((n, len(self.classes_)), dtype=float)
+
+            # collect OOF predictions
+            if self.target_type == "regression":
+                pred = model.predict(X_va)
+                oof[va_idx] = pred
+            elif self.target_type == "binary":
+                if self.use_proba_for_classification:
+                    pos_label = self.classes_[1] if len(self.classes_) >= 2 else self.classes_[0]
+                    proba = model.predict_proba(X_va)[:, list(self.classes_).index(pos_label)]
+                    oof[va_idx] = proba
+                else:
+                    labels = model.predict(X_va)
+                    oof[va_idx] = labels
+            else:  # multiclass
+                if self.use_proba_for_classification:
+                    proba = model.predict_proba(X_va)
+                    oof[va_idx, :] = proba
+                else:
+                    labels = model.predict(X_va)
+                    # convert labels to columns in class order
+                    tmp = np.zeros((len(va_idx), len(self.classes_)), dtype=float)
+                    for i, lab in enumerate(labels):
+                        tmp[i, list(self.classes_).index(lab)] = 1.0
+                    oof[va_idx, :] = tmp
+
+        # store OOF predictions as DataFrame aligned to X.index
+        if self.target_type == "regression":
+            self.oof_predictions_ = pd.DataFrame({f"{self.prefix}_pred": oof}, index=X.index)
+        elif self.target_type == "binary":
+            if self.use_proba_for_classification:
+                pos_label = self.classes_[1] if len(self.classes_) >= 2 else self.classes_[0]
+                self.oof_predictions_ = pd.DataFrame({f"{self.prefix}_proba_{pos_label}": oof}, index=X.index)
+            else:
+                self.oof_predictions_ = pd.DataFrame({f"{self.prefix}_label": oof}, index=X.index)
+        else:
+            if self.use_proba_for_classification:
+                cols = [f"{self.prefix}_proba_{c}" for c in self.classes_]
+                self.oof_predictions_ = pd.DataFrame(oof, index=X.index, columns=cols)
+            else:
+                cols = [f"{self.prefix}_label_{c}" for c in self.classes_]
+                self.oof_predictions_ = pd.DataFrame(oof, index=X.index, columns=cols)
+
+        return self
+
+    def _predict_from_models(self, X_enc: pd.DataFrame) -> pd.DataFrame:
+        """Average predictions across fold models for inference."""
+        if self.target_type == "regression":
+            preds = np.stack([m.predict(X_enc) for m in self.models_], axis=1).mean(axis=1)
+            return pd.DataFrame({f"{self.prefix}_pred": preds}, index=X_enc.index)
+
+        elif self.target_type == "binary":
+            if self.use_proba_for_classification:
+                pos_label = self.classes_[1] if len(self.classes_) >= 2 else self.classes_[0]
+                idx = list(self.classes_).index(pos_label)
+                probs = np.stack([m.predict_proba(X_enc)[:, idx] for m in self.models_], axis=1).mean(axis=1)
+                return pd.DataFrame({f"{self.prefix}_proba_{pos_label}": probs}, index=X_enc.index)
+            else:
+                # majority vote
+                labels = np.stack([m.predict(X_enc) for m in self.models_], axis=1)
+                # simple mode
+                out = pd.Series([pd.Series(row).mode().iloc[0] for row in labels], index=X_enc.index)
+                return pd.DataFrame({f"{self.prefix}_label": out}, index=X_enc.index)
+
+        else:  # multiclass
+            if self.use_proba_for_classification:
+                prob_stacks = [m.predict_proba(X_enc) for m in self.models_]
+                avg = np.stack(prob_stacks, axis=2).mean(axis=2)
+                cols = [f"{self.prefix}_proba_{c}" for c in self.classes_]
+                return pd.DataFrame(avg, index=X_enc.index, columns=cols)
+            else:
+                # majority vote -> one label column
+                labels = np.stack([m.predict(X_enc) for m in self.models_], axis=1)
+                out = pd.Series([pd.Series(row).mode().iloc[0] for row in labels], index=X_enc.index)
+                return pd.DataFrame({f"{self.prefix}_label": out}, index=X_enc.index)
+
+    def transform(self, X):
+        X = self._ensure_df(X)
+
+        # encode with already-fit encoders, then scale with already-fit scaler
+        X_raw = self._encode_raw(X)
+        X_enc = self._scale(X_raw, fit=False)
+
+        # averaged predictions across folds
+        add = self._predict_from_models(X_enc)
+
+        if self.append_encoded:
+            enc_out = X_enc.copy()
+            enc_out.columns = self.encoded_feature_names_
+            return pd.concat([X, enc_out, add], axis=1)
+
+        return pd.concat([X, add], axis=1)
+
+    def fit_transform(self, X, y):
+        """Return X with **OOF predictions** appended (not averaged predictions)."""
+        self.fit(X, y)
+        add = self.oof_predictions_
+        if self.append_encoded:
+            X_raw = self._encode_raw(self._ensure_df(X))
+            X_enc = self._scale(X_raw, fit=False)
+            enc_out = X_enc.copy()
+            enc_out.columns = self.encoded_feature_names_
+            return pd.concat([self._ensure_df(X), enc_out, add], axis=1)
+        return pd.concat([self._ensure_df(X), add], axis=1)
+
+    def get_feature_names_out(self, input_features=None):
+        base = self.feature_names_in_
+        if self.append_encoded:
+            base = base + self.encoded_feature_names_
+
+        if self.target_type == "regression":
+            extra = [f"{self.prefix}_pred"]
+        elif self.target_type == "binary":
+            extra = ([f"{self.prefix}_label"] if not self.use_proba_for_classification
+                     else [f"{self.prefix}_proba_{self.classes_[1] if len(self.classes_)>=2 else self.classes_[0]}"])
+        else:
+            extra = ([f"{self.prefix}_label"] if not self.use_proba_for_classification
+                     else [f"{self.prefix}_proba_{c}" for c in self.classes_])
+
+        return np.array(base + extra)
+
+
+from tabprep.proxy_models import CustomLinearModel
+class ModelLinearFeatureAdder(BaseEstimator, TransformerMixin):
+    def __init__(self, target_type):
+        self.target_type = target_type
+        self.model = CustomLinearModel(target_type=target_type)
+
+    def fit(self, X, y):
+        self.model.fit(X, y)
+        return self
+
+    def transform(self, X):
+        X_out = X.copy()
+        if self.target_type == "regression":
+            X_out['linear'] = self.model.predict(X)
+        elif self.target_type == "binary":
+            X_out['linear'] = self.model.predict(X)
+        elif self.target_type == "multiclass":
+            preds = self.model.predict(X)
+            for i, label in enumerate(self.model.classes_):
+                X_out[f'linear_{label}'] = preds[:, i]
+        return X_out

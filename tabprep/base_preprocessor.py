@@ -5,11 +5,11 @@ from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.pipeline import Pipeline
 from tabprep.utils import make_cv_function
 from tabprep.proxy_models import TargetMeanClassifier, TargetMeanRegressor, UnivariateLinearRegressor, UnivariateLogisticClassifier, PolynomialRegressor, PolynomialLogisticClassifier, \
-    LightGBMBinner, KMeansBinner
+    LightGBMBinner, KMeansBinner, CustomLinearModel
 import lightgbm as lgb
 from tabprep.utils import clean_feature_names
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import QuantileTransformer
+from sklearn.preprocessing import QuantileTransformer, LabelEncoder
 import time
 from typing import Literal
 
@@ -23,11 +23,15 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
                 random_state=42,
                 verbose=True,
                 lgb_model_type='default', # 'default', 'unique-based', 'huge-capacity', 'full-capacity', 'unique-based-binned', 'high-capacity', 'high-capacity-binned'
+                multi_as_bin=True,  # If True, treat multi-class as binary for the purpose of interaction tests
                  ):
         # Parameters
         # TODO: Implement (optional) multi-class functionality.
         # Changes to base preprocessor parameters:
-        self.target_type = 'binary' if target_type == 'multiclass' else target_type
+        if target_type == 'multiclass' and multi_as_bin:
+            self.target_type = 'binary'
+        else:
+            self.target_type = target_type
         self.n_folds = n_folds
         self.alpha = alpha
         self.significance_method = significance_method
@@ -36,6 +40,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         self.random_state = random_state
         self.verbose = verbose
         self.lgb_model_type = lgb_model_type
+        self.multi_as_bin = multi_as_bin  # If True, treat multi-class as binary for the purpose of interaction tests
 
         # Functions
         self.cv_func = make_cv_function(target_type=self.target_type, early_stopping_rounds=20, vectorized=False, random_state=self.random_state)
@@ -59,8 +64,13 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
 
     def adjust_target_format(self, y):
         y_out = y.copy()
-        if self.target_type in ["binary", "multiclass"]:
+        if self.target_type == "binary":
             y_out = (y==y.value_counts().index[0]).astype(int)        
+        elif self.target_type == "multiclass" and self.multi_as_bin:
+            y_out = (y==y.value_counts().index[0]).astype(int)        
+        elif self.target_type == "multiclass" and not self.multi_as_bin:
+            self.multiclass_encoder = LabelEncoder()
+            y_out = pd.Series(LabelEncoder().fit_transform(y), index=y.index, name=y.name)
         else:
             y_out = y.astype(float)
 
@@ -161,19 +171,27 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
 
         return self.cv_func(x.to_frame(), y, pipe)
 
-    def adapt_lgb_params(self, X: pd.DataFrame, base_params: dict=None, lgb_model_type=None):
+    def adapt_lgb_params(self, X: pd.DataFrame, y: pd.Series = None, base_params: dict=None, lgb_model_type=None, target_type=None):
         if lgb_model_type is None:
             lgb_model_type = self.lgb_model_type
+        if target_type is None:
+            target_type = self.target_type
+        
         if base_params is None:
 
             params = {
-                "objective": "binary" if self.target_type=="binary" else "regression",
+                "objective": target_type,
                 "boosting_type": "gbdt",
                 "n_estimators": 1000,
                 'min_samples_leaf': 2,
                 "max_depth": 5,
                 "verbosity": -1
             }
+
+            if target_type == "multiclass":
+                params["num_class"] = len(y.unique())
+
+
         else:
             params = base_params.copy()
         
@@ -254,7 +272,10 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
             
         return X_out
 
-    def get_lgb_performance(self, X_cand_in, y_in, lgb_model_type=None, custom_prep=None, residuals=None):
+    def get_lgb_performance(self, X_cand_in, y_in, lgb_model_type=None, 
+                            custom_prep=None, residuals=None, scale_y=None,
+                            reg_assign_closest_y=False,
+                            ):
         X = X_cand_in.copy()
         y = y_in.copy()
         
@@ -263,20 +284,27 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         obj_cols = X.select_dtypes(include=['object']).columns.tolist()
         X[obj_cols] = X[obj_cols].astype('category')
         # Adapt data adnd train models
-        params = self.adapt_lgb_params(X, lgb_model_type=lgb_model_type)
         if residuals is not None:
+            params = self.adapt_lgb_params(X, y=y, lgb_model_type=lgb_model_type, target_type='regression')
             model = lgb.LGBMRegressor(**params)
             original_y = y.copy()
-            y_use = residuals
+            if residuals == 'linear_residuals':
+                y_use = y.copy()
+            else:
+                y_use = residuals
         else:
-            model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
+            params = self.adapt_lgb_params(X, y=y, lgb_model_type=lgb_model_type)
+            model = lgb.LGBMClassifier(**params) if self.target_type in ["binary", 'multiclass'] else lgb.LGBMRegressor(**params)
             original_y = None
             y_use = y
         pipe = Pipeline([("model", model)])
 
-        return self.cv_func(clean_feature_names(X), y_use, pipe, return_importances=True, return_preds=True, custom_prep=custom_prep, original_y=original_y)
-
+        return self.cv_func(clean_feature_names(X), y_use, pipe, 
+                            return_importances=True, return_preds=True, custom_prep=custom_prep, 
+                            original_y=original_y, scale_y=scale_y,
+                            reg_assign_closest_y=reg_assign_closest_y
                             
+                            )
 
     def multivariate_performance_test(self, X_cand_in, y_in, 
                                       test_cols, suffix='mvp',  

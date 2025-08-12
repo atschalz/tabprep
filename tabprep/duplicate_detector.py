@@ -20,71 +20,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
-class DuplicateCountAdder(BaseEstimator, TransformerMixin):
-    """
-    A transformer that counts duplicate samples in the training set
-    and appends a new feature with those counts at transform time.
-    """
-
-    def __init__(self, feature_name: str = "duplicate_count"):
-        self.feature_name = feature_name
-
-    def fit(self, X_in, y=None):
-        """
-        Learn the duplicate‐count mapping from X.
-        
-        Parameters
-        ----------
-        X : array‐like or DataFrame, shape (n_samples, n_features)
-            Training data.
-
-        y : Ignored.
-        
-        Returns
-        -------
-        self
-        """
-        X = X_in.copy()
-        # If DataFrame, extract values but remember columns
-        if isinstance(X, pd.DataFrame):
-            self._is_df = True
-            self._columns_ = X.columns.tolist()
-            data = X.values
-        else:
-            self._is_df = False
-            data = np.asarray(X)
-        
-        # Convert each row into a hashable tuple and count
-        rows = [tuple(row) for row in data]
-        self.counts_ = Counter(rows)
-        return self
-
-    def transform(self, X_in):
-        """
-        Append the duplicate‐count feature to X.
-        
-        Parameters
-        ----------
-        X : array‐like or DataFrame, shape (n_samples, n_features)
-            New data to transform.
-        
-        Returns
-        -------
-        X_out : same type as X but with one extra column
-        """
-        X = X_in.copy()
-        # Prepare raw array and remember if DataFrame
-        if isinstance(X, pd.DataFrame):
-            cols = X.columns.tolist()
-            data = X.values
-        else:
-            data = np.asarray(X)
-        
-        # Look up counts (0 if unseen)
-        new_feat = pd.Series([self.counts_.get(tuple(row), 0) for row in data], index=X.index, name=self.feature_name)
-        
-        out = pd.concat([X, new_feat], axis=1)
-        return out
+from tabprep.preprocessors import DuplicateCountAdder
 
 def make_cv_function_for_duplicated_data(target_type, n_folds=5, early_stopping_rounds=20, 
                     random_state=42, 
@@ -215,7 +151,7 @@ def make_cv_function_for_duplicated_data(target_type, n_folds=5, early_stopping_
 
     return cv_func
 
-from base_preprocessor import BasePreprocessor
+from tabprep.base_preprocessor import BasePreprocessor
 class DuplicateDetector(BasePreprocessor):
     def __init__(self, 
                  target_type, 
@@ -336,22 +272,30 @@ class DuplicateDetector(BasePreprocessor):
         self.n_X_duplicates = X.duplicated().mean()
         self.n_Xy_duplicates = pd.concat([X,y],axis=1).duplicated().mean()
 
-        if self.n_X_duplicates < self.threshold:
-            if self.n_X_duplicates == 0:
-                print("No duplicates found in X.")
-            else:
-                print(f"Found {self.n_X_duplicates:.2%} duplicates in X. Ignore them as that is below threshold={self.threshold:.2%}.")
-            return self
+        if self.n_X_duplicates > 5 and self.n_X_duplicates == self.n_Xy_duplicates:
+            self.post_predict_duplicate_mapping = True
+            X_str = X.astype(str).sum(axis=1)
+            self.dupe_map = dict(y.groupby(X_str).mean())
+
+        # df_count_mean = pd.DataFrame([X_str.value_counts(), y.groupby(X_str).mean().loc[X_str.value_counts().index]]).transpose()
+
+
+        # if self.n_X_duplicates < self.threshold:
+        #     if self.n_X_duplicates == 0:
+        #         print("No duplicates found in X.")
+        #     else:
+        #         print(f"Found {self.n_X_duplicates:.2%} duplicates in X. Ignore them as that is below threshold={self.threshold:.2%}.")
+        #     return self
         
-        if self.handle_mode == 'warn':
-                print(f"Warning: {self.n_X_duplicates:.2%} of the samples in X are duplicates. This requires careful handling, as it may lead to overfitting or biased model evaluation.")
-                if self.n_Xy_duplicates == self.n_X_duplicates:
-                    print(f"The duplicates also match on the target. \
-                        If it is expected that train samples can appear at test time, consider setting handle_mode to 'postprocess' for avoiding to predict the known samples. \
-                            If this is not the case, consider setting handle_mode to 'preprocess' for reducing the samples to unique ones and adding sample weights to the model.")
-                else:
-                    print(f"The duplicates do not match on the target.")
-                print('In any case, it is recommended to clarify whether the duplicated samples are intended. Most likely, they are due to factors like repeated experiments, omitted variable bias or artifacts of the data collection process. It is recommended to think about the right treatment.')
+        # if self.handle_mode == 'warn':
+        #         print(f"Warning: {self.n_X_duplicates:.2%} of the samples in X are duplicates. This requires careful handling, as it may lead to overfitting or biased model evaluation.")
+        #         if self.n_Xy_duplicates == self.n_X_duplicates:
+        #             print(f"The duplicates also match on the target. \
+        #                 If it is expected that train samples can appear at test time, consider setting handle_mode to 'postprocess' for avoiding to predict the known samples. \
+        #                     If this is not the case, consider setting handle_mode to 'preprocess' for reducing the samples to unique ones and adding sample weights to the model.")
+        #         else:
+        #             print(f"The duplicates do not match on the target.")
+        #         print('In any case, it is recommended to clarify whether the duplicated samples are intended. Most likely, they are due to factors like repeated experiments, omitted variable bias or artifacts of the data collection process. It is recommended to think about the right treatment.')
 
         # elif self.handle_mode == 'preprocess':
         #     X = self.dedupe_with_weights(X, subset=X.columns.tolist())
@@ -361,110 +305,110 @@ class DuplicateDetector(BasePreprocessor):
             #     y_deduplicated = y.loc[X_deduplicated.index]
             #     self.dupe_maps = dict(zip(X_deduplicated.astype(str).sum(axis=1).values,y_deduplicated.values))
 
-        print(f"Found {self.n_X_duplicates:.2%} duplicates in X. {self.n_Xy_duplicates:.2%} of the samples match on the target.")
-        # TEST
-        X_use = X.copy()
-        obj_cols = X_use.select_dtypes(include=['object']).columns.tolist()
-        X_use[obj_cols] = X_use[obj_cols].astype('category')
+        # print(f"Found {self.n_X_duplicates:.2%} duplicates in X. {self.n_Xy_duplicates:.2%} of the samples match on the target.")
+        # # TEST
+        # X_use = X.copy()
+        # obj_cols = X_use.select_dtypes(include=['object']).columns.tolist()
+        # X_use[obj_cols] = X_use[obj_cols].astype('category')
 
-        params = {
-                    "objective": "binary" if self.target_type=="binary" else "regression",
-                    "boosting_type": "gbdt",
-                    "n_estimators": 1000,
-                    'min_samples_leaf': 1,
-                    "max_depth": 5,
-                    "verbosity": -1
-                }
+        # params = {
+        #             "objective": "binary" if self.target_type=="binary" else "regression",
+        #             "boosting_type": "gbdt",
+        #             "n_estimators": 1000,
+        #             'min_samples_leaf': 1,
+        #             "max_depth": 5,
+        #             "verbosity": -1
+        #         }
         
-        self.scores['full'] = {}
-        self.significances['full'] = {}
-        model = self.lgb_model(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
-        pipe = Pipeline([("model", model)])
-        self.scores['full']['lgb'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, return_preds=True)
+        # self.scores['full'] = {}
+        # self.significances['full'] = {}
+        # model = self.lgb_model(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
+        # pipe = Pipeline([("model", model)])
+        # self.scores['full']['lgb'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, return_preds=True)
 
-        # mean adjustment
-        method = 'mean'
-        for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
-            self.scores['full'][f'lgb-dupe-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
-            self.significances['full'][f'lgb-dupe-{method}'] = self.significance_test(
-                self.scores['full'][f'lgb-dupe-{method}'] - self.scores['full']['lgb']
-            )
-            if self.significances['full'][f'lgb-dupe-{method}'] < self.alpha:
-                print(f"Manually mapping duplicated values significantly improves performance with p={self.significances['full'][f'lgb-dupe-{method}']:.4f}")
+        # # mean adjustment
+        # method = 'mean'
+        # for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
+        #     self.scores['full'][f'lgb-dupe-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
+        #     self.significances['full'][f'lgb-dupe-{method}'] = self.significance_test(
+        #         self.scores['full'][f'lgb-dupe-{method}'] - self.scores['full']['lgb']
+        #     )
+        #     if self.significances['full'][f'lgb-dupe-{method}'] < self.alpha:
+        #         print(f"Manually mapping duplicated values significantly improves performance with p={self.significances['full'][f'lgb-dupe-{method}']:.4f}")
         
-        ### With duplicateCountAdder
-        X_use = X.copy()
-        X_use = DuplicateCountAdder().fit_transform(X_use)
-        obj_cols = X_use.select_dtypes(include=['object']).columns.tolist()
-        X_use[obj_cols] = X_use[obj_cols].astype('category')
+        # ### With duplicateCountAdder
+        # X_use = X.copy()
+        # X_use = DuplicateCountAdder().fit_transform(X_use)
+        # obj_cols = X_use.select_dtypes(include=['object']).columns.tolist()
+        # X_use[obj_cols] = X_use[obj_cols].astype('category')
 
-        model = self.lgb_model(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
-        pipe = Pipeline([
-            # ('duplicate_count_adder', DuplicateCountAdder()),
-            ("model", model)
-            ])
-        self.scores['full']['lgb-dupe-newfeatTTA'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, return_preds=True)
+        # model = self.lgb_model(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
+        # pipe = Pipeline([
+        #     # ('duplicate_count_adder', DuplicateCountAdder()),
+        #     ("model", model)
+        #     ])
+        # self.scores['full']['lgb-dupe-newfeatTTA'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, return_preds=True)
 
 
-        X_use = X.copy()
-        obj_cols = X_use.select_dtypes(include=['object']).columns.tolist()
-        X_use[obj_cols] = X_use[obj_cols].astype('category')
+        # X_use = X.copy()
+        # obj_cols = X_use.select_dtypes(include=['object']).columns.tolist()
+        # X_use[obj_cols] = X_use[obj_cols].astype('category')
 
-        pipe = Pipeline([
-            # ('duplicate_count_adder', DuplicateCountAdder()),
-            ("model", model)
-            ])
+        # pipe = Pipeline([
+        #     # ('duplicate_count_adder', DuplicateCountAdder()),
+        #     ("model", model)
+        #     ])
 
-        ### With weights as a new feature
-        self.scores['full']['lgb-dupe-newfeat'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, 
-                                                                  return_preds=True, weight_strategy=None, add_cnt=True)
-        method = 'mean'
-        for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
-            self.scores['full'][f'lgb-dupe-newfeat-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
-            self.significances['full'][f'lgb-dupe-newfeat-{method}'] = self.significance_test(
-                self.scores['full'][f'lgb-dupe-newfeat-{method}'] - self.scores['full']['lgb']
-            )
+        # ### With weights as a new feature
+        # self.scores['full']['lgb-dupe-newfeat'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, 
+        #                                                           return_preds=True, weight_strategy=None, add_cnt=True)
+        # method = 'mean'
+        # for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
+        #     self.scores['full'][f'lgb-dupe-newfeat-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
+        #     self.significances['full'][f'lgb-dupe-newfeat-{method}'] = self.significance_test(
+        #         self.scores['full'][f'lgb-dupe-newfeat-{method}'] - self.scores['full']['lgb']
+        #     )
 
-        ### With weights as a new feature
-        self.scores['full']['lgb-dupe-loo'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, 
-                                                                  return_preds=True, weight_strategy=None, add_loo=True)
-        method = 'mean'
-        for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
-            self.scores['full'][f'lgb-dupe-loo-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
-            self.significances['full'][f'lgb-dupe-loo-{method}'] = self.significance_test(
-                self.scores['full'][f'lgb-dupe-loo-{method}'] - self.scores['full']['lgb']
-            )
+        # ### With weights as a new feature
+        # self.scores['full']['lgb-dupe-loo'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, 
+        #                                                           return_preds=True, weight_strategy=None, add_loo=True)
+        # method = 'mean'
+        # for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
+        #     self.scores['full'][f'lgb-dupe-loo-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
+        #     self.significances['full'][f'lgb-dupe-loo-{method}'] = self.significance_test(
+        #         self.scores['full'][f'lgb-dupe-loo-{method}'] - self.scores['full']['lgb']
+        #     )
 
-        ### With sample weights
-        self.scores['full']['lgb-dupe-weighted'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, 
-                                                                  return_preds=True, weight_strategy='basic')
-        method = 'mean'
-        for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
-            self.scores['full'][f'lgb-dupe-weighted-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
-            self.significances['full'][f'lgb-dupe-weighted-{method}'] = self.significance_test(
-                self.scores['full'][f'lgb-dupe-weighted-{method}'] - self.scores['full']['lgb']
-            )
+        # ### With sample weights
+        # self.scores['full']['lgb-dupe-weighted'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, 
+        #                                                           return_preds=True, weight_strategy='basic')
+        # method = 'mean'
+        # for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
+        #     self.scores['full'][f'lgb-dupe-weighted-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
+        #     self.significances['full'][f'lgb-dupe-weighted-{method}'] = self.significance_test(
+        #         self.scores['full'][f'lgb-dupe-weighted-{method}'] - self.scores['full']['lgb']
+        #     )
 
-        ### With sample weights
-        self.scores['full']['lgb-featcnt'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, 
-                                                                  return_preds=True, add_feat_cnt=True)
-        method = 'mean'
-        for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
-            self.scores['full'][f'lgb-featcnt-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
-            self.significances['full'][f'lgb-featcnt-{method}'] = self.significance_test(
-                self.scores['full'][f'lgb-featcnt-{method}'] - self.scores['full']['lgb']
-            )
+        # ### With sample weights
+        # self.scores['full']['lgb-featcnt'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, 
+        #                                                           return_preds=True, add_feat_cnt=True)
+        # method = 'mean'
+        # for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
+        #     self.scores['full'][f'lgb-featcnt-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
+        #     self.significances['full'][f'lgb-featcnt-{method}'] = self.significance_test(
+        #         self.scores['full'][f'lgb-featcnt-{method}'] - self.scores['full']['lgb']
+        #     )
 
 
         ### Combine weights, loo, and cnt features
-        self.scores['full']['lgb-dupe-alltricks'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, 
-                                                                  return_preds=True, weight_strategy='basic', add_cnt=True, add_loo=True)
-        method = 'mean'
-        for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
-            self.scores['full'][f'lgb-dupe-alltricks-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
-            self.significances['full'][f'lgb-dupe-alltricks-{method}'] = self.significance_test(
-                self.scores['full'][f'lgb-dupe-alltricks-{method}'] - self.scores['full']['lgb']
-            )
+        # self.scores['full']['lgb-dupe-alltricks'], preds = self.cv_func(clean_feature_names(X_use), y, pipe, 
+        #                                                           return_preds=True, weight_strategy='basic', add_cnt=True, add_loo=True)
+        # method = 'mean'
+        # for method in ['mean', 'frequent', 'uniform', 'frequent_uniform']:
+        #     self.scores['full'][f'lgb-dupe-alltricks-{method}'] = self.adjust_predictions(X_use, y, preds, method=method)
+        #     self.significances['full'][f'lgb-dupe-alltricks-{method}'] = self.significance_test(
+        #         self.scores['full'][f'lgb-dupe-alltricks-{method}'] - self.scores['full']['lgb']
+        #     )
 
         # self.scores['full']['lgb-dupe-reverseweighted'], preds = self.cv_func(clean_feature_names(X_use), y, pipe,
         #                                                           return_preds=True, weight_strategy='reverse')
@@ -488,94 +432,20 @@ class DuplicateDetector(BasePreprocessor):
 
         return self
     
-    def transform(self, X_in, y_in=None):
-        return X_in
+    def transform(self, X_in, y_pred):
+        X = X_in.copy()
+        X_str = X.astype(str).sum(axis=1)
+        new_pred = [float(self.dupe_maps[i]) if i in self.dupe_maps else float(y_pred.iloc[num])  for num, i in enumerate(X_str)]
+        new_pred = pd.Series(new_pred, index=y_pred.index, name=y_pred.name)
 
-    def _post_fit(self, X_in, y_in=None):
-        # TODO: Find out how to include the post_fit in AG
-        y = y_in.copy()
+        return new_pred
+
+    # def _post_fit(self, X_in, y_in=None):
+    #     # TODO: Find out how to include the post_fit in AG
+    #     y = y_in.copy()
         
-        y_adj = [float(self.dupe_maps[i]) if i in self.dupe_maps else float(y.iloc[num])  for num, i in enumerate(test_str)]
-        y_adj = pd.Series(y_adj, index=pred.index, name=pred.name)
+    #     y_adj = [float(self.dupe_maps[i]) if i in self.dupe_maps else float(y.iloc[num])  for num, i in enumerate(test_str)]
+    #     y_adj = pd.Series(y_adj, index=pred.index, name=pred.name)
 
-        return y_adj
+    #     return y_adj
 
-
-if __name__ == "__main__":
-    from ft_detection import clean_feature_names
-    import os
-    from tabprep.utils import *
-    import openml
-    from ft_detection import clean_feature_names
-    benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
-    dataset_name = 'wine'
-    for benchmark in ['TabArena']: # ["Grinsztajn", "TabArena", "TabZilla"]:
-        exp_name = f"EXP_duplicates_{benchmark}"
-        if os.path.exists(f"{exp_name}.pkl"):
-            with open(f"{exp_name}.pkl", "rb") as f:
-                results = pickle.load(f)
-        else:
-            results = {}
-            results['performance'] = {}
-            results['iterations'] = {}
-            results['significances'] = {}
-
-        tids, dids = get_benchmark_dataIDs(benchmark)  
-
-        remaining_cols = {}
-
-        for tid, did in zip(tids, dids):
-            task = openml.tasks.get_task(tid)  # to check if the datasets are available
-            data = openml.datasets.get_dataset(did)  # to check if the datasets are available
-            # if dataset_name not in data.name:
-            #     continue
-        
-            
-            if data.name in results['performance']:
-                print(f"Skipping {data.name} as it already exists in results.")
-                print(pd.DataFrame(results['performance'][data.name]).mean().sort_values(ascending=False))
-                continue
-            # else:
-            #     break
-            print(data.name)
-            if data.name == 'guillermo':
-                continue
-            X, _, _, _ = data.get_data()
-            y = X[data.default_target_attribute]
-            X = X.drop(columns=[data.default_target_attribute])
-            
-            # X = X.sample(n=1000)
-            # y = y.loc[X.index]
-
-            if benchmark == "Grinsztajn" and X.shape[0]>10000:
-                X = X.sample(10000, random_state=0)
-                y = y.loc[X.index]
-
-            if task.task_type == "Supervised Classification":
-                target_type = "binary" if y.nunique() == 2 else "multiclass"
-            else:
-                target_type = 'regression'
-            if target_type=="multiclass":
-                # TODO: Fix this hack
-                y = (y==y.value_counts().index[0]).astype(int)  # make it binary
-                target_type = "binary"
-            elif target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
-                y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
-            else:
-                y = y.astype(float)
-            
-            detector = DuplicateDetector(
-                target_type=target_type, 
-            )
-
-            detector.fit(X, y)
-
-            results['performance'][data.name] = detector.scores
-            results['significances'][data.name] = detector.significances
-
-            print(pd.DataFrame(results['performance'][data.name]).apply(lambda x: np.mean(np.mean(x)),axis=1).sort_values())
-
-        with open(f"{exp_name}.pkl", "wb") as f:
-            pickle.dump(results, f)
-
-    

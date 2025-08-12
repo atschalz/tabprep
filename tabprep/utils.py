@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import re
 from collections import Counter
-from sklearn.preprocessing import LabelEncoder, QuantileTransformer, StandardScaler, MinMaxScaler
+from sklearn.preprocessing import LabelEncoder, QuantileTransformer, StandardScaler, MinMaxScaler, PowerTransformer
 import os
 import matplotlib.pyplot as plt 
 from matplotlib.backends.backend_pdf import PdfPages
@@ -25,6 +25,7 @@ from scipy.special import expit
 from tqdm import tqdm
 import random
 from sklearn.metrics import roc_auc_score, r2_score, root_mean_squared_error, log_loss, accuracy_score, f1_score, precision_score, recall_score
+from tabprep.proxy_models import CustomLinearModel
 
 def clean_feature_names(X_input: pd.DataFrame):
     X = X_input.copy()
@@ -176,10 +177,6 @@ def get_metadata_df(tasks, dids, subset: str = None) -> pd.DataFrame:
     # )
     #metadata_df.to_csv("metadata/tabarena_dataset_metadata.csv", index=False)
     return metadata_df
-
-
-
-
 
 def get_benchmark_dataIDs(benchmark_name):
     import openml
@@ -1386,6 +1383,43 @@ def analyze_feature_types(X, y, target_type='binary', early_stopping_rounds=20, 
         "significances": significances
     }
 
+
+def assign_closest(a_values: pd.Series, b_values: pd.Series) -> pd.Series:
+    """
+    For each value in series `a`, find the closest value in series `b`.
+    
+    Parameters:
+    a (pd.Series): Series of values to match.
+    b (pd.Series): Series of candidate values.
+    
+    Returns:
+    pd.Series: Series of closest matches from b for each value in a.
+    """
+    # Convert to numpy for speed
+    if isinstance(a_values, pd.Series):
+        a_values = a_values.to_numpy()
+    if isinstance(b_values, pd.Series):
+        b_values = b_values.to_numpy()
+
+    # Sort b for faster searching
+    b_sorted = np.sort(b_values)
+    
+    # For each value in a, find position in sorted b where it could be inserted
+    idxs = np.searchsorted(b_sorted, a_values, side="left")
+    
+    # Compare with neighbor on the left and right, choose the closest
+    closest = []
+    for val, idx in zip(a_values, idxs):
+        candidates = []
+        if idx > 0:
+            candidates.append(b_sorted[idx - 1])
+        if idx < len(b_sorted):
+            candidates.append(b_sorted[min(idx, len(b_sorted) - 1)])
+        closest_val = min(candidates, key=lambda x: abs(x - val))
+        closest.append(closest_val)
+    # FIXME: Check index
+    return pd.Series(closest)
+
 def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20, 
                     random_state=42, 
                     vectorized=False, verbose=False,
@@ -1400,18 +1434,18 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
         scorer = lambda ytr, ypr: -root_mean_squared_error(ytr, ypr) # r2_score
         cv = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
     elif target_type=='multiclass':
-        scorer = lambda ytr, ypr: -log_loss(ytr, ypr) # r2_score
+        scorer = lambda y_true, y_pred: -log_loss(y_true, y_pred) # FIXME: Adjust to make sure function runs when not all classes are present
         cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
     else:   
         raise ValueError("target_type must be 'binary' or 'regression'")
 
     def cv_func(X_df, y_s, pipeline, custom_prep=None, return_iterations=False, return_preds=False, 
-                return_importances=False, scale_y=False, original_y=None):
+                return_importances=False, scale_y=None, original_y=None, reg_assign_closest_y=False):
         scores = []
         iterations = []
         all_preds = []
         feature_importances = []
-        if original_y is not None:
+        if original_y is not None and scale_y != 'linear_residuals':
             splits = cv.split(X_df, original_y, groups=groups)
             scorer_use = lambda ytr, ypr: -root_mean_squared_error(ytr, ypr)
         else:
@@ -1420,48 +1454,110 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
         for train_idx, test_idx in splits:
             X_tr, y_tr = X_df.iloc[train_idx], y_s.iloc[train_idx]
             X_te, y_te = X_df.iloc[test_idx], y_s.iloc[test_idx]
+            
+            col_names = X_df.columns
 
             if custom_prep is not None:
                 for prep in custom_prep:
                     X_tr = prep.fit_transform(X_tr, y_tr)
                     X_te = prep.transform(X_te)
+                if not isinstance(X_tr, pd.DataFrame):
+                    if X_tr.shape[1]==len(col_names):
+                        X_tr = pd.DataFrame(X_tr, columns=X_df.columns)
+                    else:
+                        X_tr = pd.DataFrame(X_tr)
+                if not isinstance(X_te, pd.DataFrame):
+                    if X_te.shape[1]==len(col_names):
+                        X_te = pd.DataFrame(X_te, columns=X_df.columns)
+                    else:
+                        X_te = pd.DataFrame(X_te)
 
-            if scale_y:
-                from sklearn.preprocessing import StandardScaler
-                scaler = StandardScaler()
-                y_tr = pd.Series(scaler.fit_transform(y_tr.values.reshape(-1, 1)).ravel(), name=y_tr.name, index=y_tr.index)
-                y_te = pd.Series(scaler.transform(y_te.values.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
-
+            if scale_y is not None:
+                if scale_y  == 'standard':
+                    from sklearn.preprocessing import StandardScaler
+                    scaler = StandardScaler()
+                    y_tr = pd.Series(scaler.fit_transform(y_tr.values.reshape(-1, 1)).ravel(), name=y_tr.name, index=y_tr.index)
+                    y_te = pd.Series(scaler.transform(y_te.values.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
+                elif scale_y  == 'power':
+                    scaler = PowerTransformer()
+                    y_tr = pd.Series(scaler.fit_transform(y_tr.values.reshape(-1, 1)).ravel(), name=y_tr.name, index=y_tr.index)
+                    y_te = pd.Series(scaler.transform(y_te.values.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
+                elif scale_y  == 'log':
+                    y_tr = np.log1p(y_tr)
+                    y_te = np.log1p(y_te)
+                elif scale_y == 'linear_residuals':
+                    lm = CustomLinearModel(target_type)
+                    lm.fit(X_tr, y_tr)
+                    y_tr_lin = lm.predict(X_tr)
+                    y_te_lin = lm.predict(X_te)
+                else:
+                    raise ValueError("scale_y must be 'standard' or 'log'")
+            
             final_model = pipeline.named_steps["model"]
 
             # if it's an LGBM model, pass in eval_set + callbacks
             if isinstance(final_model, (lgb.LGBMClassifier, lgb.LGBMRegressor)):
-                pipeline.fit(
-                    X_tr, y_tr,
-                    **{
-                        "model__eval_set": [(X_te, y_te)],
-                        "model__callbacks": [lgb.early_stopping(early_stopping_rounds, verbose=verbose)],
-                        # "model__verbose": False
-                    }
-                )
+                if scale_y == 'linear_residuals':
+                    # if scale_y is linear_residuals, we need to pass the residuals
+                    pipeline.fit(
+                        X_tr, y_tr - y_tr_lin,
+                        **{
+                            "model__eval_set": [(X_te, y_te - y_te_lin)],
+                            "model__callbacks": [lgb.early_stopping(early_stopping_rounds, verbose=verbose)],
+                            # "model__verbose": False
+                        }
+                    )
+                else:
+                    pipeline.fit(
+                        X_tr, y_tr,
+                        **{
+                            "model__eval_set": [(X_te, y_te)],
+                            "model__callbacks": [lgb.early_stopping(early_stopping_rounds, verbose=verbose)],
+                            # "model__verbose": False
+                        }
+                    )
             else:
                 # dummy / other estimators: plain fit
                 pipeline.fit(X_tr, y_tr)
 
             # predict
-            if target_type == "binary" and hasattr(pipeline, "predict_proba"):
+            if target_type == "regression" or scale_y == 'linear_residuals' or not hasattr(pipeline, "predict_proba"):
+                preds = pipeline.predict(X_te)
+            elif target_type == "binary":
                 if vectorized:
                     preds = pipeline.predict_proba(X_te)[:, :, 1]
                 else:
                     preds = pipeline.predict_proba(X_te)[:, 1]
-            else:
-                preds = pipeline.predict(X_te)
+            elif target_type == 'multiclass':
+                if vectorized:
+                    preds = pipeline.predict_proba(X_te)
+                else:
+                    preds = pipeline.predict_proba(X_te)
 
-            if scale_y:
-                # inverse transform predictions if scaled
-                preds = pd.Series(scaler.inverse_transform(preds.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
-                y_tr = pd.Series(scaler.inverse_transform(y_tr.values.reshape(-1, 1)).ravel(), name=y_tr.name, index=y_tr.index)
-                y_te = pd.Series(scaler.inverse_transform(y_te.values.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
+            if scale_y is not None:
+                if scale_y == 'standard':
+                    preds = pd.Series(scaler.inverse_transform(preds.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
+                    y_tr = pd.Series(scaler.inverse_transform(y_tr.values.reshape(-1, 1)).ravel(), name=y_tr.name, index=y_tr.index)
+                    y_te = pd.Series(scaler.inverse_transform(y_te.values.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
+                elif scale_y == 'power':
+                    preds = pd.Series(scaler.inverse_transform(preds.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
+                    y_tr = pd.Series(scaler.inverse_transform(y_tr.values.reshape(-1, 1)).ravel(), name=y_tr.name, index=y_tr.index)
+                    y_te = pd.Series(scaler.inverse_transform(y_te.values.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
+                elif scale_y == 'log':
+                    preds = np.expm1(preds)
+                    y_tr = np.expm1(y_tr)
+                    y_te = np.expm1(y_te)
+                elif scale_y == 'linear_residuals':
+                    if target_type == 'binary':
+                        preds = preds + y_te_lin
+                        preds = preds.clip(0.00001,0.9999)
+                else:
+                    raise ValueError("scale_y must be 'standard' or 'log'")
+
+            if reg_assign_closest_y and target_type == 'regression':
+                # Assign closest y value to y_tr and y_te
+                preds = assign_closest(preds,y_tr)
+
 
             if vectorized:
                 scores.append({col: scorer_use(y_te, preds[:,num]) for num, col in enumerate(X_df.columns)})
@@ -1469,7 +1565,10 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                 scores.append(scorer_use(y_te, preds))
 
             if return_preds:
-                all_preds.append(pd.Series(preds, name=y_te.name, index=y_te.index))
+                if isinstance(final_model, lgb.LGBMClassifier) and y_tr.nunique() > 2:
+                    all_preds.append(pd.DataFrame(preds, index=y_te.index))
+                else:
+                    all_preds.append(pd.Series(preds, name=y_te.name, index=y_te.index))
 
             if isinstance(final_model, (lgb.LGBMClassifier, lgb.LGBMRegressor)):
                 iterations.append(pipeline.named_steps['model'].booster_.num_trees())
@@ -1485,7 +1584,6 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                     feature_importances.append(
                         pd.Series({X_tr.columns[0]: pipeline.named_steps['model'].coef_[0]})
                     )
-
 
         # TODO: Might change to return a dict instead
         if return_iterations and return_preds and return_importances:
@@ -1511,8 +1609,6 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
     return cv_func
 
 
-
-
 def drop_infrequent_values(series, thresh=1):
     value_counts = series.value_counts()
     non_unique_values = value_counts[value_counts > thresh].index
@@ -1527,7 +1623,6 @@ def drop_mode_values(series, thresh=1):
     value_counts = series.value_counts()
     mode_values = value_counts.index[thresh:]
     return series[series.isin(mode_values)]
-
     
 def safe_stratified_group_kfold(X, y, groups, n_splits=5, max_attempts=1):
     sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)

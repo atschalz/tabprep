@@ -388,6 +388,19 @@ class NumericalInteractionDetector(BasePreprocessor):
 
         return X[feature_names].corrwith(x, method='spearman').max()
 
+    # def filter_to_one_combination(self, X_int, y):
+    # TODO: Idea to filter based on the correlation with the target to keep only one candidate per feature pair
+    #     col = x.name
+    #     feature_names = [f for f in re.split(r'_(x|/|\+|\-)_', col) if f not in {'x', '/', '+', '-'}]
+
+    #     return X[feature_names].corrwith(x, method='spearman').max()
+
+    def select_by_target_corr(self, int_corr, base_corrs):
+        col = int_corr.name
+        feature_names = [f for f in re.split(r'_(x|/|\+|\-)_', col) if f not in {'x', '/', '+', '-'}]
+
+        return int_corr > base_corrs.loc[feature_names].max()
+
     def remove_constant_features(self, X):
         return X.loc[:, X.std() > 0]
     
@@ -414,13 +427,28 @@ class NumericalInteractionDetector(BasePreprocessor):
         X_num = X_num.loc[:, X_num.nunique() > self.min_cardinality]
         X_num = self.remove_mostlynan_features(X_num)
         # X_num = self.remove_constant_features(X_num)
-
-        if len(X_num.columns) == 0:
+        
+        if len(X_num.columns) <2:
             self.detection_attempted = False
             self.new_cols = []
             return self
         X_int = self.get_all_possible_interactions(X_num, order=2, max_base_interactions=self.max_base_interactions)
         
+        ### NEW
+        # base_corrs = X_num.corrwith(y).abs().sort_values(ascending=False)
+        # int_corrs = X_int.corrwith(y).abs().sort_values(ascending=False)
+        # keep_cols = pd.DataFrame(int_corrs).apply(lambda x: self.select_by_target_corr(x, base_corrs),axis=1)
+        # X_int = X_int.loc[:, keep_cols.index[keep_cols[0]==True]]
+
+        # X_all = pd.concat([X_num, X_int], axis=1)
+        # X_corr = self.fast_spearman(X_all)
+        # X_uncorr = drop_highly_correlated_features(X_corr)
+        # X_int = X_int.loc[:, X_int.columns.isin(X_uncorr.columns)]
+
+        # X_new = X.copy()
+        # X_new['int'] = X['Age']/X['Water']
+        # X_new['int2'] = X['Age']*X['Superplastizer']
+
         # if self.apply_filters:
         #     X_all = pd.concat([X_num, X_int], axis=1)
         #     X_corr = self.fast_spearman(X_all)
@@ -429,8 +457,8 @@ class NumericalInteractionDetector(BasePreprocessor):
         
         curr_order = 2
         max_candidates = self.select_n_candidates*(self.max_order-1)
-        while X_int.shape[1] < max_candidates and X_num.shape[1] > curr_order:
-            if curr_order == self.max_order:
+        while X_int.shape[1] < max_candidates: # and X_num.shape[1] > curr_order:
+            if curr_order == self.max_order or len(X_num.columns) < curr_order+1:
                 break
             X_int = self.add_higher_interaction(X_num, X_int, max_base_interactions=self.max_base_interactions)
             # if self.apply_filters:
@@ -444,12 +472,12 @@ class NumericalInteractionDetector(BasePreprocessor):
 
         if len(cand_cols) > self.max_filter:
             X_int = X_int.sample(n=self.max_filter, random_state=42, replace=False, axis=1)
-            
+
         # if self.apply_filters:
         # Filter constant features
         X_int = self.remove_constant_features(X_int)
         cand_cols = X_int.columns.tolist()
-        
+
         # Filter features for which the range is too similar to the base features
         if self.select_n_candidates is not None:
             X_abs_corr = X_int.apply(lambda x: self.remove_same_range_features(X_num, x)).abs()
@@ -465,7 +493,11 @@ class NumericalInteractionDetector(BasePreprocessor):
                                                     test_cols=cand_cols, max_cols_use=self.mvp_max_cols_use
                                                     )
 
-
+        # Keep one candidate per interaction based on y corr
+        # base_corrs = X_num.corrwith(y).abs().sort_values(ascending=False)
+        # int_corrs = X_int.corrwith(y).abs().sort_values(ascending=False)
+        # X_int = X_int[int_corrs.index[int_corrs>0.1]]        
+        
         self.new_cols = X_int.columns.tolist()
 
         # if len(X_num.columns) == 0:

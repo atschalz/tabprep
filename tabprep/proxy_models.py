@@ -985,8 +985,82 @@ class KMeansBinner(BaseEstimator, TransformerMixin):
     def get_feature_names_out(self, input_features=None):
         return np.array(self.feature_names_in_, dtype=object)
 
+import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
 
+class CustomLinearModel(BaseEstimator):
+    def __init__(self, target_type, standardize_target=True):
+        self.target_type = target_type  # 'regression' or 'classification'
+        self.standardize_target = standardize_target
 
+        # Initialize internal variables
+        self.model = None
+        self.target_scaler = None
+        self.pipeline = None
 
+    def fit(self, X_in, y_in):
+        X = X_in.copy()
+        y = y_in.copy()
+        # Determine which columns are categorical or numerical
+        categorical_cols = X.select_dtypes(include=['object', 'category']).columns
+        numerical_cols = X.select_dtypes(include=[np.number]).columns
 
+        # Define transformers for preprocessing
+        transformers = [
+            ('num', Pipeline([
+                ('imputer', SimpleImputer(strategy='mean')),
+                ('scaler', StandardScaler())
+            ]), numerical_cols),
+            ('cat', Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False, max_categories=100))
+            ]), categorical_cols)
+        ]
+
+        # Combine transformations in a ColumnTransformer
+        self.pipeline = ColumnTransformer(transformers)
+
+        # Fit the transformers and transform the data
+        self.pipeline.fit(X)
+        X_transformed = self.pipeline.transform(X) 
+        
+        if self.target_type == 'regression':
+            # Standardize the target if regression
+            self.target_scaler = StandardScaler()
+            y_scaled = self.target_scaler.fit_transform(y.values.reshape(-1, 1)).flatten()
+
+            # Fit the regression model (using LinearRegression)
+            self.model = LinearRegression()
+            self.model.fit(X_transformed, y_scaled)
+        elif self.target_type in ['binary', 'multiclass']:
+            # Fit the classification model (using LogisticRegression)
+            self.model = LogisticRegression()
+            self.model.fit(X_transformed, y)
+        else:
+            raise ValueError("target_type must be 'regression' or 'classification'")
+
+        return self
+
+    def predict(self, X):
+        # Transform the features using the fitted pipeline
+        X_transformed = self.pipeline.transform(X)
+
+        # Predict based on the model type
+        if self.target_type == 'regression':
+            y_pred_scaled = self.model.predict(X_transformed)
+            y_pred = self.target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+            return y_pred
+        elif self.target_type == 'binary':
+            return self.model.predict_proba(X_transformed)[:, 1]
+        elif self.target_type == 'multiclass':
+            return self.model.predict_proba(X_transformed)
+        else:
+            raise ValueError("target_type must be 'regression' or 'classification'")
 
