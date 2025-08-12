@@ -1,13 +1,13 @@
 import openml
 import pandas as pd
 import numpy as np
-from tabrepo.nips2025_utils import tabarena_context
 from tabprep.utils import get_benchmark_dataIDs
 from tabrepo.nips2025_utils.tabarena_context import TabArenaContext
 import os
 import matplotlib.pyplot as plt
 
 def get_val_test_corr(tids, model_names=['LightGBM', 'CatBoost', 'XGBoost', 'TabPFNv2_GPU', 'RealMLP', 'TabM_GPU']):
+    tabarena_context = TabArenaContext()
     res_mean = pd.DataFrame(columns=model_names)
     res_std = pd.DataFrame(columns=model_names)
     res_all = {}
@@ -38,10 +38,10 @@ def check_result_availability(exp_name, model_names, tids, repeats, folds):
                 for model_name in model_names:
                     availabilities.append([
                         tid, repeat, fold, model_name,
-                        'c1', os.path.exists(f"results/{exp_name}/data/{model_name}_c1_BAG_L1/{tid}/{repeat}_{fold}/results.pkl")
+                        'c1', os.path.exists(f"../results/{exp_name}/data/{model_name}_c1_BAG_L1/{tid}/{repeat}_{fold}/results.pkl")
                     ])
                     for r in range(1,200):
-                        path = f"results/{exp_name}/data/{model_name}_r{r}_BAG_L1/{tid}/{repeat}_{fold}/results.pkl"
+                        path = f"../results/{exp_name}/data/{model_name}_r{r}_BAG_L1/{tid}/{repeat}_{fold}/results.pkl"
                         availabilities.append([
                            tid, repeat, fold, model_name,
                            f'r{r}', os.path.exists(path)
@@ -51,10 +51,207 @@ def check_result_availability(exp_name, model_names, tids, repeats, folds):
         'task_id', 'repeat', 'fold', 'model_name', 'config_type', 'available'
     ])
 
+def load_all_configs(exp_name, repeats=3, folds=3, trials = 200, use_datasets=None, impute = True):
+    tabarena_context = TabArenaContext()
+
+    # exp_name = 'all_in_one'
+    # repeats = 3
+    # use_datasets = ['hiva_agnostic', 'Bioresponse', 'kddcup09_appetency', 'MIC','Diabetes130US', 'anneal', 'qsar-biodeg']
+    # trials = 200
+
+    tids, dids = get_benchmark_dataIDs('TabArena')
+    ta_results = tabarena_context.load_config_results('LightGBM')
+    new_entries = []
+    results_lst = []
+    for tid, did in zip(tids, dids):
+        task = openml.tasks.get_task(tid)  # to check if the datasets are available
+        data = openml.datasets.get_dataset(did)  # to check if the datasets are available
+        if use_datasets is not None and data.name not in use_datasets:
+            continue
+        for repeat in range(repeats):
+            for fold in range(folds):
+                new_res_found = False
+                try:
+                    path = f"../results/{exp_name}/data/LightGBM_c1_BAG_L1/{tid}/{repeat}_{fold}/results.pkl"
+                    with open(path, "rb") as f:
+                        results = pd.read_pickle(f)
+                        new_entry = pd.Series({
+                            'dataset': results['task_metadata']['name'],
+                            'fold': results['task_metadata']['fold']+(3*results['task_metadata']['repeat']),
+                            'method': results['framework'],
+                            'metric_error': float(results['metric_error']),
+                            'time_train_s': float(results['time_train_s']),
+                            'time_infer_s': float(results['time_infer_s']),
+                            'metric': results['metric'],
+                            'problem_type': results['problem_type'],
+                            'metric_error_val': float(results['metric_error_val']),
+                            'method_type': 'config',
+                            'config_type': results['framework'].split('_')[0]+'(CSV)',
+                            'ta_name': 'CSV',
+                            'ta_suite': 'CSV',
+                            'imputed': False
+                        })
+                        new_entries.append(new_entry)
+                        results['framework'] += 'CSV'
+                        results_lst.append(results)
+                        new_res_found = True
+
+                    for r in range(1,trials+1):
+                        path = f"../results/{exp_name}/data/LightGBM_r{r}_BAG_L1/{tid}/{repeat}_{fold}/results.pkl"
+                        with open(path, "rb") as f:
+                            results = pd.read_pickle(f)
+                            new_entry = pd.Series({
+                                'dataset': results['task_metadata']['name'],
+                                'fold': results['task_metadata']['fold']+(3*results['task_metadata']['repeat']),
+                                'method': results['framework'],
+                                'metric_error': results['metric_error'],
+                                'time_train_s': results['time_train_s'],
+                                'time_infer_s': results['time_infer_s'],
+                                'metric': results['metric'],
+                                'problem_type': results['problem_type'],
+                                'metric_error_val': results['metric_error_val'],
+                                'method_type': 'config',
+                                'config_type': results['framework'].split('_')[0]+'(CSV)',
+                                'ta_name': 'CSV',
+                                'ta_suite': 'CSV',
+                                'imputed': False
+                            })
+                            new_entries.append(new_entry)
+                            results['framework'] += 'CSV'
+                            results_lst.append(results)
+                            new_res_found = True
+
+                except FileNotFoundError:
+                    print(f"Results for {data.name} at {path} not found. Fill with TabArena results.")
+                    # res = ta_results.loc[ta_results.dataset==data.name]
+                    # res.loc[res.groupby('fold')['metric_error_val'].idxmin(), 'metric_error'].mean()
+                if not new_res_found and impute:
+                    rep_fold = fold+(3*repeat)
+                    res = ta_results.loc[ta_results.dataset==data.name]
+                    res = res.loc[res['fold']==rep_fold]
+                    new_entry = res[['dataset', 'fold', 'method', 'metric_error', 'time_train_s',
+                        'time_infer_s', 'metric', 'problem_type', 'metric_error_val',
+                        'method_type', 'config_type', 'ta_name', 'ta_suite']]
+                    new_entry.loc[:, 'config_type'] = new_entry['method'].apply(lambda x: x.split('_')[0] + '(CSV)')
+                    new_entry.loc[:, 'ta_name'] = 'CSV'
+                    new_entry.loc[:, 'ta_suite'] = 'CSV'
+                    new_entry.loc[:, 'imputed'] = True
+                    new_entries += [new_entry.loc[i] for i in new_entry.index]
+    model_results = pd.concat(new_entries, ignore_index=True,axis=1).T
+    return model_results
+
+
+def compare_new_to_old(model_results):
+    tabarena_context = TabArenaContext()
+    ta_results = tabarena_context.load_config_results('LightGBM')
+    improved_trials = {}
+    improved_trials_val = {}
+    for dataset_name in model_results.dataset.unique():
+        my = model_results.loc[model_results.dataset==dataset_name]
+        ta = ta_results.loc[ta_results.dataset==dataset_name]
+        merged = pd.merge(my, ta, on=['dataset', 'fold', 'method'], suffixes=('_my', '_ta'))
+        merged[['fold','method', 'metric_error_my', 'metric_error_ta']]
+        improved_trials[dataset_name] = sum(np.sign(merged[['metric_error_my', 'metric_error_ta']].diff(axis=1).iloc[:,1]))/merged.shape[0]
+        improved_trials_val[dataset_name] = sum(np.sign(merged[['metric_error_val_my', 'metric_error_val_ta']].diff(axis=1).iloc[:,1]))/merged.shape[0]    # print(f"{dataset_name}: {improved_trials[dataset_name]:.2f}")
+    df_improved_trials = pd.concat([pd.Series(improved_trials),pd.Series(improved_trials_val)],axis=1)
+    df_improved_trials.columns = ['Test', 'Val']
+    
+
+    return df_improved_trials.sort_values('Test', ascending=False)
+
+
+def compare_to_others(model_results, lgb_use = 'tuned'):
+    from tabrepo.nips2025_utils.tabarena_context import TabArenaContext
+    tabarena_context = TabArenaContext()
+
+    # exp_name = 'all_in_one_0806_v2'
+    # model_results = pd.read_csv(f"../model_results_{exp_name}.csv")
+
+    default = model_results.loc[model_results['method'].apply(lambda x: 'c1' in x)]
+    default['method'] = 'LightGBM(CSV)'
+    default['config_type'] = 'default'
+    tuned = model_results.loc[model_results.groupby(['dataset', 'fold']).apply(lambda x: x['metric_error_val'].idxmin()).values]
+    tuned['method'] = 'LightGBM(CSV)'
+    tuned['config_type'] = 'tuned'
+    tuned_ensemble = model_results.loc[model_results.groupby(['dataset', 'fold']).apply(lambda x: x['metric_error_val'].idxmin()).values]
+    tuned_ensemble['method'] = 'LightGBM(CSV)'
+    tuned_ensemble['config_type'] = 'tuned + ensemble'
+
+    ta_results = tabarena_context.load_config_results('LightGBM')
+    ta_results = ta_results[ta_results.fold<=8]
+    ta_default = ta_results.loc[ta_results['method'].apply(lambda x: 'c1' in x)]
+    ta_default['method'] = 'LightGBM'
+    ta_default['config_type'] = 'default'
+    ta_tuned = ta_results.loc[ta_results.groupby(['dataset', 'fold']).apply(lambda x: x['metric_error_val'].idxmin()).values]
+    ta_tuned['method'] = 'LightGBM'
+    ta_tuned['config_type'] = 'tuned'
+    ta_tuned_ensemble = ta_results.loc[ta_results.groupby(['dataset', 'fold']).apply(lambda x: x['metric_error_val'].idxmin()).values]
+    ta_tuned_ensemble['method'] = 'LightGBM'
+    ta_tuned_ensemble['config_type'] = 'tuned + ensemble'
+
+    ag_results = tabarena_context.load_config_results('AutoGluon_v130')
+    ag_results = ag_results[ag_results.fold<=8]
+
+    tabpfn_results = tabarena_context.load_config_results('TabPFNv2_GPU')
+    tabpfn_results = tabpfn_results[tabpfn_results.fold<=8]
+    tabpfn_default = tabpfn_results.loc[tabpfn_results['method'].apply(lambda x: 'c1' in x)]
+    tabpfn_default['method'] = 'TabPFNv2'
+    tabpfn_default['config_type'] = 'default'
+    tabpfn_tuned = tabpfn_results.loc[tabpfn_results.groupby(['dataset', 'fold']).apply(lambda x: x['metric_error_val'].idxmin()).values]
+    tabpfn_tuned['method'] = 'TabPFNv2'
+    tabpfn_tuned['config_type'] = 'tuned'
+
+    rf_results = tabarena_context.load_config_results('RandomForest')
+    rf_results = rf_results[rf_results.fold<=8]
+    rf_default = rf_results.loc[rf_results['method'].apply(lambda x: 'c1' in x)]
+    rf_default['method'] = 'RF'
+    rf_default['config_type'] = 'default'
+
+    if lgb_use == 'default':
+        lgb_use = default
+        lgb_ta_use = ta_default
+    elif lgb_use == 'tuned':
+        lgb_use = tuned
+        lgb_ta_use = ta_tuned
+
+    comp_df = pd.concat([
+        rf_default.groupby('dataset')['metric_error'].mean(),
+        tabpfn_default.groupby('dataset')['metric_error'].mean(),
+        tabpfn_tuned.groupby('dataset')['metric_error'].mean(),
+        ag_results.groupby('dataset')['metric_error'].mean(),
+        lgb_ta_use.groupby('dataset')['metric_error'].mean(),
+        lgb_use.groupby('dataset')['metric_error'].mean()],axis=1)
+        # ta_default.groupby('dataset')['metric_error'].mean(),
+        # default.groupby('dataset')['metric_error'].mean()
+    comp_df.columns = ['RF (default)', 'TabPFNv2 (default)', 'TabPFNv2 (tuned)', 'AutoGluon', 'TabArena', 'New']
+    return comp_df
 
 if __name__ == "__main__":
     tids, dids = get_benchmark_dataIDs('TabArena')
-    availabilities = check_result_availability('all_in_one', ['LightGBM'], tids, list(range(3)), list(range(3)))
+    exp_name = 'all_in_one_0808'
+    availabilities = check_result_availability(exp_name, ['LightGBM'], tids, list(range(3)), list(range(3)))
+    print(availabilities['available'].mean())
+    model_results = load_all_configs(exp_name, repeats=3, folds=3, trials = 200, impute=False)
+    df_improved_trials = compare_new_to_old(model_results)
+    print(df_improved_trials)
+
+    comp_df = compare_to_others(model_results)
+
+    tabarena_context = TabArenaContext()
+    ta_results = tabarena_context.load_config_results('LightGBM')
+    comp_df = pd.merge(model_results,ta_results,on=['dataset', 'fold','method'])
+    print((comp_df['metric_error_x']-comp_df['metric_error_y']).groupby(comp_df['dataset']).mean())
+    print(pd.concat([comp_df.groupby('dataset')['metric_error_x'].min(),comp_df.groupby('dataset')['metric_error_y'].min()], axis=1))    
+    
+    # model_results_filtered = model_results.loc[np.logical_not(model_results['imputed'].values)]
+    # available = model_results_filtered.method.unique()
+    # ta_sub = ta_results.loc[ta_results.method.apply(lambda x: x in available)]
+    # my_sub = model_results.loc[model_results.method.apply(lambda x: x in available)]
+    # ta_sub = ta_sub[ta_sub.fold<=8]
+    # comp_sub = pd.concat([my_sub.groupby('dataset')['metric_error'].min(),ta_sub.groupby('dataset')['metric_error'].min()], axis=1)
+    # print(comp_sub.loc[comp_sub.diff(axis=1).iloc[:,1]!=0])
+    
+    model_results.to_csv(f"model_results_{exp_name}.csv", index=False)
     print('DONE')
 
 # tabarena_context = TabArenaContext()
