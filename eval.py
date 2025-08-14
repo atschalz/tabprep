@@ -228,20 +228,49 @@ def compare_to_others(model_results, lgb_use = 'tuned'):
 
 if __name__ == "__main__":
     tids, dids = get_benchmark_dataIDs('TabArena')
-    exp_name = 'all_in_one_0808'
+    exp_name = 'all_in_one_0812'
     availabilities = check_result_availability(exp_name, ['LightGBM'], tids, list(range(3)), list(range(3)))
     print(availabilities['available'].mean())
     model_results = load_all_configs(exp_name, repeats=3, folds=3, trials = 200, impute=False)
     df_improved_trials = compare_new_to_old(model_results)
     print(df_improved_trials)
-
-    comp_df = compare_to_others(model_results)
+    print(model_results.groupby('dataset')['metric_error'].count().sum()/(1809*51))
+    
+    # How many results are finished?
+    print(model_results.groupby('dataset')['metric_error'].count())
+    
+    comp_df_others = compare_to_others(model_results)
 
     tabarena_context = TabArenaContext()
     ta_results = tabarena_context.load_config_results('LightGBM')
+    ta_results = ta_results.loc[ta_results['fold']<9]
     comp_df = pd.merge(model_results,ta_results,on=['dataset', 'fold','method'])
     print((comp_df['metric_error_x']-comp_df['metric_error_y']).groupby(comp_df['dataset']).mean())
-    print(pd.concat([comp_df.groupby('dataset')['metric_error_x'].min(),comp_df.groupby('dataset')['metric_error_y'].min()], axis=1))    
+    # print(pd.concat([comp_df.groupby('dataset')['metric_error_x'].min(),comp_df.groupby('dataset')['metric_error_y'].min()], axis=1))    
+    print(pd.concat([comp_df.groupby('dataset').apply(lambda x: x['metric_error_x'][x['metric_error_val_x'].idxmin()]),comp_df.groupby('dataset').apply(lambda x: x['metric_error_y'][x['metric_error_val_y'].idxmin()])], axis=1))    
+    
+    ### Determine the targeted time
+    target_time = 120
+    print(dict((target_time/(model_results.groupby('dataset')['time_train_s'].max()/60)).astype(int)))
+
+    # Compare multipe folds of one dataset
+    dat = 'jm1'
+    pd.concat([
+        model_results.loc[np.logical_and(model_results.dataset==dat, model_results.method=='LightGBM_c1_BAG_L1'),'metric_error'].reset_index(drop=True),
+        ta_results.loc[np.logical_and(ta_results.dataset==dat, ta_results.method=='LightGBM_c1_BAG_L1'),'metric_error'].reset_index(drop=True),
+    ], axis=1, ignore_index=True)
+    
+    # Test for validation overfitting
+    mean_val_test_corr = pd.DataFrame(ta_results.groupby(['dataset', 'fold']).apply(lambda x: x['metric_error'].corr(x['metric_error_val']))).unstack().mean(axis=1).sort_values()
+    std_val_test_corr = pd.DataFrame(ta_results.groupby(['dataset', 'fold']).apply(lambda x: x['metric_error'].corr(x['metric_error_val']))).unstack().std(axis=1)
+    std_val_test_corr = std_val_test_corr.loc[mean_val_test_corr.index]
+    print_val_test_corr = mean_val_test_corr.round(2).astype(str) + ' (' + std_val_test_corr.round(2).astype(str) + ')'
+
+    new_mean_val_test_corr = pd.DataFrame(model_results.groupby(['dataset', 'fold']).apply(lambda x: x['metric_error'].corr(x['metric_error_val']))).unstack().mean(axis=1).sort_values()
+    new_std_val_test_corr = pd.DataFrame(model_results.groupby(['dataset', 'fold']).apply(lambda x: x['metric_error'].corr(x['metric_error_val']))).unstack().std(axis=1)
+    new_std_val_test_corr = new_std_val_test_corr.loc[new_mean_val_test_corr.index]
+    new_print_val_test_corr = new_mean_val_test_corr.round(2).astype(str) + ' (' + new_std_val_test_corr.round(2).astype(str) + ')'
+    print(pd.concat([print_val_test_corr,new_print_val_test_corr], axis=1))
     
     # model_results_filtered = model_results.loc[np.logical_not(model_results['imputed'].values)]
     # available = model_results_filtered.method.unique()
