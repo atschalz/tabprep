@@ -217,6 +217,18 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
                 "n_estimators": 1000,
                 "verbosity": -1
             }
+        elif lgb_model_type=="quantile_1":
+            params["objective"] = "quantile"
+            params["alpha"] = 0.1  # median
+        elif lgb_model_type=="quantile_3":
+            params["objective"] = "quantile"
+            params["alpha"] = 0.3  # median
+        elif lgb_model_type=="quantile_5":
+            params["objective"] = "quantile"
+            params["alpha"] = 0.5  # median
+        elif lgb_model_type=="quantile_9":
+            params["objective"] = "quantile"
+            params["alpha"] = 0.9  # median
         elif lgb_model_type=="fast":
             params["max_depth"] = 2
             params["n_estimators"] = 100

@@ -176,6 +176,14 @@ class AllInOneEngineer(BasePreprocessor):
         # if sum(X.nunique()==2)!=X.shape[1]:
         self.scores['full'][f'lgb-{self.lgb_model_type}'], base_preds, base_feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type)
 
+        if 'quantile_reg' in self.engineering_techniques:
+            self.scores['full'][f'quantile_1'], q_preds, q_imp = self.get_lgb_performance(X, y, lgb_model_type='quantile_1')
+            self.scores['full'][f'quantile_3'], q_preds, q_imp = self.get_lgb_performance(X, y, lgb_model_type='quantile_3')
+            self.scores['full'][f'quantile_5'], q_preds, q_imp = self.get_lgb_performance(X, y, lgb_model_type='quantile_5')
+            self.scores['full'][f'quantile_9'], q_preds, q_imp = self.get_lgb_performance(X, y, lgb_model_type='quantile_9')
+            # if np.mean(self.scores['full'][f'quantile_9']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
+            #     pass
+
         if 'linear_residuals' in self.engineering_techniques:
             if self.target_type != 'multiclass':
                 self.scores['full'][f'linear'], linear_preds = self.cv_func(X, y, Pipeline([
@@ -752,7 +760,7 @@ if __name__ == "__main__":
     from tabprep.utils import *
     import openml
     benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
-    dataset_name = 'airfoil'
+    dataset_name = 'physio'
     for benchmark in ['TabArena']: # ["Grinsztajn", "TabArena", "TabZilla"]:
         exp_name = f"EXP_AllInOne-numint3{benchmark}"
         if False: #os.path.exists(f"{exp_name}.pkl"):
@@ -804,7 +812,7 @@ if __name__ == "__main__":
             detector = AllInOneEngineer(        
                 target_type=target_type,
                 # engineering_techniques=['cat_as_num', 'cat_freq', 'cat_int', 'cat_groupby', 'num_int', 'groupby', 'linear_residuals'],
-                engineering_techniques=['freq_as_ohe'],
+                engineering_techniques=['quantile_reg'],
                 use_residuals=False,
                                         )
 
