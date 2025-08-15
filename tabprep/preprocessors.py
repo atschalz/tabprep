@@ -1707,3 +1707,38 @@ class ModelLinearFeatureAdder(BaseEstimator, TransformerMixin):
             for i, label in enumerate(self.model.classes_):
                 X_out[f'linear_{label}'] = preds[:, i]
         return X_out
+
+
+import pandas as pd
+from sklearn.preprocessing import OneHotEncoder
+
+class FrequencyOHE:
+    def __init__(self, min_freq=10, sparse=False, dtype=float):
+        self.min_freq = min_freq
+        self.sparse = sparse
+        self.dtype = dtype
+        self.ohe = OneHotEncoder(
+            handle_unknown="infrequent_if_exist",
+            min_frequency=min_freq,
+            sparse_output=sparse,
+            dtype=dtype
+        )
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X)
+        self.feature_names_in_ = list(X.columns)
+        self.ohe.fit(X)
+        return self
+
+    def transform(self, X):
+        X = pd.DataFrame(X)
+        arr = self.ohe.transform(X)
+        if not self.sparse and hasattr(arr, "toarray"):
+            arr = arr.toarray()
+        ohe_cols = self.ohe.get_feature_names_out(self.feature_names_in_)
+        df_ohe = pd.DataFrame(arr, columns=ohe_cols, index=X.index)
+        return pd.concat([X.reset_index(drop=True), df_ohe.reset_index(drop=True)], axis=1)
+
+    def fit_transform(self, X, y=None):
+        return self.fit(X).transform(X)
+

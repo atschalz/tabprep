@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sklearn.preprocessing import MinMaxScaler, StandardScaler, PowerTransformer, QuantileTransformer, OrdinalEncoder
+from sklearn.preprocessing import MinMaxScaler, StandardScaler, PowerTransformer, QuantileTransformer, OrdinalEncoder, OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -545,6 +545,17 @@ class AllInOneEngineer(BasePreprocessor):
 
 
         # Cat-as-ohe detection
+        if 'freq_as_ohe' in self.engineering_techniques:            
+            if len(X_cat.columns) > 0: # and X_cat.nunique().max() > 100:
+                from tabprep.preprocessors import FrequencyOHE
+                self.scores['freq_as_ohe'] = {}
+                self.scores['freq_as_ohe'][f'lgb-{self.lgb_model_type}'], preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, custom_prep=[FrequencyOHE(min_freq=20)])
+
+                if np.mean(self.scores['freq_as_ohe'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
+                    print('Use OHE')
+                    self.transformers.append(CatOHETransformer().fit(X))
+
+        # Cat-as-ohe detection
         if 'cat_as_ohe' in self.engineering_techniques:            
             if len(X_cat.columns) > 0: # and X_cat.nunique().max() > 100:
                 self.scores['cat_as_ohe'] = {}
@@ -741,7 +752,7 @@ if __name__ == "__main__":
     from tabprep.utils import *
     import openml
     benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
-    dataset_name = 'blood'
+    dataset_name = 'airfoil'
     for benchmark in ['TabArena']: # ["Grinsztajn", "TabArena", "TabZilla"]:
         exp_name = f"EXP_AllInOne-numint3{benchmark}"
         if False: #os.path.exists(f"{exp_name}.pkl"):
@@ -762,8 +773,8 @@ if __name__ == "__main__":
         for tid, did in zip(tids, dids):
             task = openml.tasks.get_task(tid)  # to check if the datasets are available
             data = openml.datasets.get_dataset(did)  # to check if the datasets are available
-            # if dataset_name not in data.name:
-            #     continue
+            if dataset_name not in data.name:
+                continue
             
             if data.name in results['performance']:
                 print(f"Skipping {data.name} as it already exists in results.")
@@ -793,7 +804,7 @@ if __name__ == "__main__":
             detector = AllInOneEngineer(        
                 target_type=target_type,
                 # engineering_techniques=['cat_as_num', 'cat_freq', 'cat_int', 'cat_groupby', 'num_int', 'groupby', 'linear_residuals'],
-                engineering_techniques=['duplicate_mapping'],
+                engineering_techniques=['freq_as_ohe'],
                 use_residuals=False,
                                         )
 
