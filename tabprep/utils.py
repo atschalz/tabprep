@@ -1439,8 +1439,27 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
     else:   
         raise ValueError("target_type must be 'binary' or 'regression'")
 
+    def _density_weights(y_base, n_bins=20, clip=(0.2, 5.0)):
+        vals = np.asarray(y_base)
+        # Continuous targets: quantile-bin inverse frequency
+        if np.issubdtype(vals.dtype, np.number) and np.unique(vals).size > max(10, n_bins // 2):
+            from sklearn.preprocessing import KBinsDiscretizer
+            kb = KBinsDiscretizer(n_bins=n_bins, encode="ordinal", strategy="quantile")
+            bins = kb.fit_transform(vals.reshape(-1, 1)).astype(int).ravel()
+            counts = np.bincount(bins, minlength=n_bins).astype(float)
+            w = 1.0 / np.maximum(counts[bins], 1.0)
+        else:
+            # Discrete labels: class inverse frequency
+            _, inv, counts = np.unique(vals, return_inverse=True, return_counts=True)
+            w = 1.0 / np.maximum(counts[inv], 1.0)
+        w = w / np.mean(w)
+        if clip is not None:
+            w = np.clip(w, clip[0], clip[1])
+        return w
+
     def cv_func(X_df, y_s, pipeline, custom_prep=None, return_iterations=False, return_preds=False, 
-                return_importances=False, scale_y=None, original_y=None, reg_assign_closest_y=False):
+                return_importances=False, scale_y=None, original_y=None, reg_assign_closest_y=False,
+                sample_weights=None):
         scores = []
         iterations = []
         all_preds = []
@@ -1482,9 +1501,16 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                     scaler = PowerTransformer()
                     y_tr = pd.Series(scaler.fit_transform(y_tr.values.reshape(-1, 1)).ravel(), name=y_tr.name, index=y_tr.index)
                     y_te = pd.Series(scaler.transform(y_te.values.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
+                elif scale_y  == 'quantile':
+                    scaler = QuantileTransformer(output_distribution='normal', random_state=42)
+                    y_tr = pd.Series(scaler.fit_transform(y_tr.values.reshape(-1, 1)).ravel(), name=y_tr.name, index=y_tr.index)
+                    y_te = pd.Series(scaler.transform(y_te.values.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
                 elif scale_y  == 'log':
                     y_tr = np.log1p(y_tr)
                     y_te = np.log1p(y_te)
+                elif scale_y  == 'exp':
+                    y_tr = np.expm1(y_tr)
+                    y_te = np.expm1(y_te)
                 elif scale_y == 'linear_residuals':
                     lm = CustomLinearModel(target_type)
                     lm.fit(X_tr, y_tr)
@@ -1495,15 +1521,28 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
             
             final_model = pipeline.named_steps["model"]
 
+            if sample_weights == 'density':
+                if original_y is not None:
+                    y_tr_for_weights = original_y.iloc[train_idx]
+                else:
+                    y_tr_for_weights = y_s.iloc[train_idx]
+                w_tr = _density_weights(y_tr_for_weights)                
+            elif sample_weights is None:
+                w_tr = None
+            else:
+                raise ValueError("sample_weights must be None or 'density'")
+
             # if it's an LGBM model, pass in eval_set + callbacks
             if isinstance(final_model, (lgb.LGBMClassifier, lgb.LGBMRegressor)):
                 if scale_y == 'linear_residuals':
                     # if scale_y is linear_residuals, we need to pass the residuals
                     pipeline.fit(
                         X_tr, y_tr - y_tr_lin,
+                        **fit_params,
                         **{
                             "model__eval_set": [(X_te, y_te - y_te_lin)],
                             "model__callbacks": [lgb.early_stopping(early_stopping_rounds, verbose=verbose)],
+                            "model__sample_weight": w_tr,
                             # "model__verbose": False
                         }
                     )
@@ -1513,6 +1552,7 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                         **{
                             "model__eval_set": [(X_te, y_te)],
                             "model__callbacks": [lgb.early_stopping(early_stopping_rounds, verbose=verbose)],
+                            "model__sample_weight": w_tr,
                             # "model__verbose": False
                         }
                     )
@@ -1535,11 +1575,7 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                     preds = pipeline.predict_proba(X_te)
 
             if scale_y is not None:
-                if scale_y == 'standard':
-                    preds = pd.Series(scaler.inverse_transform(preds.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
-                    y_tr = pd.Series(scaler.inverse_transform(y_tr.values.reshape(-1, 1)).ravel(), name=y_tr.name, index=y_tr.index)
-                    y_te = pd.Series(scaler.inverse_transform(y_te.values.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
-                elif scale_y == 'power':
+                if scale_y in ['standard', 'power', 'quantile']:
                     preds = pd.Series(scaler.inverse_transform(preds.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
                     y_tr = pd.Series(scaler.inverse_transform(y_tr.values.reshape(-1, 1)).ravel(), name=y_tr.name, index=y_tr.index)
                     y_te = pd.Series(scaler.inverse_transform(y_te.values.reshape(-1, 1)).ravel(), name=y_te.name, index=y_te.index)
@@ -1547,6 +1583,10 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                     preds = np.expm1(preds)
                     y_tr = np.expm1(y_tr)
                     y_te = np.expm1(y_te)
+                elif scale_y  == 'exp':
+                    preds = np.log1p(preds)
+                    y_tr = np.log1p(y_tr)
+                    y_te = np.log1p(y_te)
                 elif scale_y == 'linear_residuals':
                     if target_type == 'binary':
                         preds = preds + y_te_lin
