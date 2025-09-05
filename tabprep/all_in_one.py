@@ -1,16 +1,10 @@
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sklearn.preprocessing import MinMaxScaler, StandardScaler, PowerTransformer, QuantileTransformer, OrdinalEncoder, OneHotEncoder
-from sklearn.impute import SimpleImputer
-from sklearn.dummy import DummyClassifier, DummyRegressor
-from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.pipeline import Pipeline
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.metrics import roc_auc_score, r2_score, root_mean_squared_error, log_loss
-from tabprep.proxy_models import TargetMeanClassifier, TargetMeanRegressor, UnivariateLinearRegressor, UnivariateLogisticClassifier, PolynomialLogisticClassifier, PolynomialRegressor, UnivariateThresholdClassifier, MultiFeatureTargetMeanClassifier, MultiFeatureUnivariateLogisticClassifier, LightGBMBinner, KMeansBinner, TargetMeanRegressorCut, TargetMeanClassifierCut, CustomLinearModel
-from tabprep.utils import p_value_wilcoxon_greater_than_zero, clean_feature_names, clean_series, make_cv_function, p_value_sign_test_median_greater_than_zero, p_value_ttest_greater_than_zero
-import time
+from sklearn.metrics import roc_auc_score, root_mean_squared_error, log_loss
+from tabprep.proxy_models import  CustomLinearModel
+from tabprep.utils import clean_feature_names, make_cv_function
 from category_encoders import LeaveOneOutEncoder
 from tabprep.base_preprocessor import BasePreprocessor
 
@@ -19,27 +13,59 @@ from tabprep.num_interaction import NumericalInteractionDetector
 from tabprep.groupby_interactions import GroupByFeatureEngineer
 from autogluon.features.generators.drop_duplicates import DropDuplicatesFeatureGenerator
 
-class AllInOneEngineer(BasePreprocessor):
-    def __init__(self, target_type, use_residuals=False,
-                 n_folds=5, alpha=0.1, significance_method='wilcoxon', mvp_criterion='significance', mvp_max_cols_use=100, verbose=True,
-                 combination_test_min_bins=2, combination_test_max_bins=2048, binning_strategy='lgb',                 
-                 engineering_techniques: list=[],
-                 lgb_model_type='default',
-                 ):
-        self.original_target_type = target_type
-        # NOTE: Idea: Reinvent interaction test by first categorizing a dataset into 1) there are already clear categorical features; 2) there are only numerical features; 3) there are only numerical features, but many categorical candidates. And based on that use different interaction tests.
-        # TODO: Make sure that everything is deterministic given a fixed seed
-        super().__init__(target_type=target_type, n_folds=n_folds, alpha=alpha, significance_method=significance_method, mvp_criterion=mvp_criterion, mvp_max_cols_use=mvp_max_cols_use, verbose=verbose, multi_as_bin=False)
+from tabprep.modeling_utils import adapt_lgb_params, adjust_target_format
+
+from typing import Union, Optional, List, Callable, Literal, Dict, Any
+
+# TODO: Define hyperparameters for the techniques and consider more general format per technique
+RegisteredTechniques: Dict[str, Dict[str, Any]] = {
+    'drop_irrelevant': {'irrelevant_threshold': 0.01}, # Filter techniques that are not used in any fold
+    'cat_freq': {},
+    'cat_as_num': {},
+    'cat_as_loo': {},
+    'cat_as_ohe': {},
+    'cat_int': {},
+    'cat_groupby': {},
+    'num_int': {},
+    'groupby': {},
+    'duplicate_mapping': {},
+    'linear_residuals': {},
+    'quantile_reg': {},
+    'SVD': {}
+}
+
+# TODO: Define a better name once overall package structure is clear
+class AllInOneEngineer():
+    def __init__(
+            self, 
+            target_type: Literal["binary", "multiclass", "regression"], 
+            engineering_techniques: Optional[List[str]] = None,
+            use_residuals: bool = False,
+            n_folds: int = 5,
+            lgb_model_type: Literal["default"] = "default", # TODO: Add supported ones; TODO: Add option to use own hyperparameters
+            min_cardinality: int = 6,
+            early_stopping_rounds: int = 20,
+            technique_params: Optional[Dict[str, Dict[str, Any]]] = RegisteredTechniques,
+            verbose: bool = False,
+            **kwargs
+            ):
+        self.target_type = target_type
+        self.registered_techniques = list(RegisteredTechniques.keys())
         self.use_residuals = use_residuals
-        self.combination_test_min_bins = combination_test_min_bins
-        self.combination_test_max_bins = combination_test_max_bins
-        self.binning_strategy = binning_strategy
-        self.engineering_techniques = engineering_techniques
         self.lgb_model_type = lgb_model_type
+        self.min_cardinality = min_cardinality
+        self.technique_params = technique_params
+        self.verbose = verbose
 
+        if engineering_techniques is None:
+            self.engineering_techniques = []
+            import warnings
+            warnings.warn("No engineering techniques provided. No feature engineering will be performed.")
+        else:
+            self.engineering_techniques = engineering_techniques
 
-        # Functions
-        self.cv_func = make_cv_function(target_type=self.target_type, early_stopping_rounds=20)
+        # Define evaluation functions
+        self.cv_func = make_cv_function(target_type=self.target_type, early_stopping_rounds=early_stopping_rounds, n_folds=n_folds, verbose=verbose)
         if self.target_type=='binary':
             self.scorer = roc_auc_score #lambda ytr, ypr: -log_loss(ytr, ypr) # roc_auc_score
         elif self.target_type=='regression':
@@ -47,787 +73,569 @@ class AllInOneEngineer(BasePreprocessor):
         elif self.target_type=='multiclass':
             self.scorer = lambda ytr, ypr: -log_loss(ytr, ypr) # r2_score
 
-        # Output variables
-        self.scores = {}
-        self.significances = {}
-        self.feature_target_rep = {}
-        self.transformers = []
-        self.base_transformers = []
-        self.transformers_unfitted = []
+        # Predefine output variables
+        self.preprocessors_running = [] # TODO: Add category dtype assignment, and potentially also others
+        self.scores = {} # {data_version: model_type: [scores across folds]}
         self.drop_cols = []
+        self.transformers = [] # Transformers that just add features (e.g., CatInt)
+        self.base_transformers = [] # Transformers that modify the original features (e.g., CatAsNum) or are applied in sequential order
+
+        # TODO: These parameters are redundant, remove once logic in tabrepo is finalized
         self.post_predict_duplicate_mapping = False
         
-        # self.target_transformers = []
-        self.linear_residuals = None
         self.dupe_map = {}
-        self.map_duplicates = False
 
-    def cat_threshold_test(self, X, y, early_stopping=True, verbose=False):
-        X_use = X.copy()
-        remaining_cols = X_use.columns.tolist()
-        # for q in np.linspace(0.1,1,max_binning_configs, endpoint=False):
-
-        if self.target_type == 'regression':
-            target_cut_model = lambda t: TargetMeanRegressorCut(t)
-        else:
-            target_cut_model = lambda t: TargetMeanClassifierCut(t)
-
-        for cnum, col in enumerate(X_use.columns):            
-            if cnum==0:
-                minus_done = 0
-            possible_thresholds = X_use[col].value_counts(ascending=True).unique()
-            for thresh in possible_thresholds:
-                if early_stopping and len(remaining_cols)==0:
-                    break                
-                if early_stopping and col not in remaining_cols: # early_stopping=True is used if we just want to quickly find numeric features. If best performance matters, we would rather try all bins
-                    minus_done += 1
-                    continue                
-                if verbose:
-                    print(f"\rCat-Threshold test with max_bin of {thresh}: {cnum-minus_done+1}/{len(remaining_cols)} columns processed", end="", flush=True)
-
-                x_use = X_use[col].copy()
-                pipe = Pipeline([
-                    ("model", target_cut_model(thresh))
-                ])
-                self.scores[col][f"cat_threshold_test_{thresh}"] = self.cv_func(X[[col]], y, pipe)
-
-                self.significances[col][f"test_cat_threshold_test_{thresh}_superior"] = self.significance_test(
-                        self.scores[col][f"cat_threshold_test_{thresh}"] - self.scores[col]["mean"]
-                    )
-
-                self.significances[col][f"test_mean_superior_to_cat_threshold{thresh}"] = self.significance_test(
-                        self.scores[col]["mean"] - self.scores[col][f"cat_threshold_test_{thresh}"]
-                    )
-
-                self.significances[col][f"cat_threshold{thresh}_superior_to_dummy"] = self.significance_test(
-                        self.scores[col][f"cat_threshold_test_{thresh}"] - self.scores[col]["dummy"]
-                    )
-                
-                if early_stopping and self.significances[col][f"test_mean_superior_to_cat_threshold{thresh}"] < self.alpha:
-                    remaining_cols.remove(col)
-                    break
-
-    def get_target_rep_type(self, X, y):
+    def get_lgb_performance(
+            self, 
+            X_cand_in: pd.DataFrame, 
+            y_in: pd.Series, 
+            lgb_model_type: str = None, 
+            custom_prep: List[Any] = None, 
+            residuals: str | pd.Series = None, 
+            scale_y: str = None,
+            reg_assign_closest_y: bool = False,
+            ): 
+        X = X_cand_in.copy()
+        y = y_in.copy()
         
-        # 1. Get all dummy-mean scores
-        self.get_dummy_mean_scores(X, y)
-
-        X_cat = X.select_dtypes(include=['object', 'category'])
-        X_num = X.select_dtypes(exclude=['object', 'category'])
-
-        assert X_cat.shape[1] + X_num.shape[1] ==  X.shape[1], "Not all features covered through num/cat selection."
-
-        if X_num.shape[1] > 0:
-            # 2. Get all combination scores
-            comb_cols = self.combination_test(X_num, y, early_stopping=False)
-            
-            # 3. Get linear scores
-            linear_cols = self.interpolation_test(X_num, y, max_degree=1)
-
-        if X_cat.shape[1] > 0:
-            self.cat_threshold_test(X_cat, y)
-
-        for col in X.columns:
-            self.feature_target_rep[col] = pd.Series(pd.DataFrame(self.scores[col]).mean().sort_values()).idxmax()
-            
-        num_as_cat = [self.feature_target_rep[col]=='mean' for col in X.columns]
-        if any(num_as_cat):
-            self.cat_threshold_test(X.loc[: , num_as_cat], y)
-
-    def cat_as_num(self, X_in):
-        X_out = X_in.copy()
-        for col in X_out.select_dtypes(include=['object', 'category']).columns:
-            num_convertible = pd.to_numeric(X_out[col].dropna(), errors='coerce').notna().all()
-            if num_convertible:
-                X_out[col] = pd.to_numeric(X_out[col], errors='coerce')
+        # TODO: Write a 'preprocess_for_lgb' function using AG
+        # Necessary preprocessing
+        obj_cols = X.select_dtypes(include=['object']).columns.tolist()
+        X[obj_cols] = X[obj_cols].astype('category')
+        # Adapt data adnd train models
+        if residuals is not None:
+            params = adapt_lgb_params(target_type='regression', lgb_model_type=lgb_model_type, X=X, y=y)
+            model = lgb.LGBMRegressor(**params)
+            original_y = y.copy()
+            if isinstance(residuals,str) and residuals == 'linear_residuals':
+                y_use = y.copy()
+            elif isinstance(residuals,pd.Series):
+                y_use = residuals
             else:
-                X_out[col] = OrdinalEncoder().fit_transform(X_out[[col]]).flatten()
-        return X_out
+                raise ValueError(f"Unknown residuals option: {residuals}. Use 'linear_residuals' or provide a pd.Series with the residuals.")
+        else:
+            params = adapt_lgb_params(target_type=self.target_type, lgb_model_type=lgb_model_type, X=X, y=y)
+            model = lgb.LGBMClassifier(**params) if self.target_type in ["binary", 'multiclass'] else lgb.LGBMRegressor(**params)
+            original_y = None
+            y_use = y
+        pipe = Pipeline([("model", model)])
 
-    def fit(self, X_input, y_input=None, verbose=False):
-        if not isinstance(X_input, pd.DataFrame):
-            X_input = pd.DataFrame(X_input)
-        if not isinstance(y_input, pd.DataFrame):
-            y_input = pd.Series(y_input)
-        X = X_input.copy()
-        y = y_input.copy()
+        return self.cv_func(clean_feature_names(X), y_use, pipe, 
+                            return_importances=True, return_preds=True, custom_prep=custom_prep, 
+                            original_y=original_y, scale_y=scale_y,
+                            reg_assign_closest_y=reg_assign_closest_y
+                            )
 
-        y = self.adjust_target_format(y) # TODO: Adapt for multiclass
-
-        # Save some properties of the original input data
-        self.orig_dtypes = {col: "categorical" if dtype in ["object", "category", str] else "numeric" for col,dtype in dict(X.dtypes).items()}
-        for col in self.orig_dtypes:
-            if X[col].nunique()<=2:
-                self.orig_dtypes[col] = "binary"
-        self.original_cat_features = [key for key, value in self.orig_dtypes.items() if value == "categorical"]
-        self.col_names = X.columns
-        self.changes_to_cols = {col: "None" for col in self.col_names}
-        self.changes_to_cols = {col: "raw" for col in self.col_names} 
-
-        # 0. Apply AG preprocessing and get the base scores
+    def prefilter_X(self, X: pd.DataFrame):
+        # TODO: Remove constant columns
         old_cols = X.columns.tolist()
         X = DropDuplicatesFeatureGenerator().fit_transform(X)
         if X.shape[1] < len(old_cols):
             self.drop_cols.extend([col for col in old_cols if col not in X.columns])
         X = X.drop(columns=self.drop_cols, errors='ignore', axis=1)
+        return X
 
-        # FIXME: Need a global function to filter to engineering techniques that will be applied and only fit the full model if necessary
+    def _get_column_types(self, X: pd.DataFrame):
+        """
+        Utility method to get binary, categorical, and numerical columns based on cardinality and dtype.
+        """
+        bin_cols = X.columns[X.nunique() <= 2].tolist()
+        cat_cols = X.columns[(X.nunique() > 2) & (X.dtypes.isin(['object', 'category']))].tolist()
+        num_cols = X.columns[(X.nunique() > 2) & (~X.dtypes.isin(['object', 'category']))].tolist()
+        assert len(cat_cols) + len(num_cols) + len(bin_cols) ==  X.shape[1], "Not all features covered through num/cat selection."
+        return bin_cols, cat_cols, num_cols
+
+    def filter_techniques(self, X: pd.DataFrame, y: pd.Series):
+        # Use utility method to get column types
+        bin_cols, cat_cols, num_cols = self._get_column_types(X)
+        applicable_techniques = []
+        for t in self.engineering_techniques:
+            if t not in self.registered_techniques:
+                raise ValueError(f"Engineering technique {t} not recognized. Available techniques: {self.registered_techniques}")
+            
+            # Always applicable
+            if t in ['drop_irrelevant']:
+                applicable_techniques.append(t)
+            
+            # Not applicable to classification
+            if t in ['quantile_reg'] and self.target_type in ['binary', 'multiclass']:
+                continue
+            # Not applicable to multiclass
+            if t in ['linear_residuals', 'duplicate_mapping'] and self.target_type in ['multiclass']:
+                continue
+
+            if t == 'duplicate_mapping':
+                if X.shape[1] >= 1000: # It's unlikely that there are duplicates in very wide datasets
+                    continue
+
+                n_X_duplicates = X.duplicated().mean()
+                n_Xy_duplicates = pd.concat([X,y],axis=1).duplicated().mean()
+                # Only apply to datasets with more than 10% duplicates and where almost all duplicates have the same target value
+                # TODO: Rethink duplicate detection strategy
+                if n_X_duplicates <= 0.1 or (n_X_duplicates-n_Xy_duplicates)>=0.01: 
+                    continue
+
+            if t == 'duplicate_count':
+                n_X_duplicates = X.duplicated().mean()
+
+                if n_X_duplicates<=0.001:
+                    continue
+
+            # Only applicable if categorical features are present
+            if t in ['cat_as_num', 'cat_as_loo', 'cat_as_ohe', 'cat_freq', 'cat_int', 'cat_groupby']:
+                if len(cat_cols) == 0:
+                    continue
+
+                if t == 'cat_freq':
+                    # Only test extensively if there are candidate categorical features
+                    cat_freq = FreqAdder()
+                    candidate_cols = cat_freq.filter_candidates_by_distinctiveness(X[cat_cols])
+                    if len(candidate_cols) == 0:
+                        continue
+
+                # TODO: Reconsider filtering by cardinality
+                if t == 'cat_int' and (len(cat_cols) < 2 or (X[cat_cols].nunique() > 5).sum() < 2):
+                    continue
+
+                if t == 'cat_groupby':
+                    if not (X[cat_cols].nunique() >= self.min_cardinality).sum() > 2:
+                        continue
+            
+            if t in ['num_int']:
+                if len(num_cols) < 2: # TODO: Test impact of cardinality filter or sum(X[num_cols].nunique() > 5)<2:
+                    continue
+            
+            if t in ['groupby']:
+                if len(cat_cols) == 0 or len(num_cols) == 0:
+                    continue
+                if not (X[cat_cols].nunique() >= self.min_cardinality).any() or not (X[num_cols].nunique() >= self.min_cardinality).any():
+                    continue
+
+            if t == 'bin_summarize' and len(bin_cols) < 20: 
+                continue
+
+            applicable_techniques.append(t)
+
+        return applicable_techniques
+
+    def adjust_detection_order(self, techniques: List[str]):
+        # Ensure that duplicate_count is always first or second if drop_irrelevant is also used
+        if 'duplicate_count' in techniques and techniques[0] != 'duplicate_count':
+            techniques.remove('duplicate_count')
+            techniques = ['duplicate_count'] + techniques
+        
+        # Ensure that drop_irrelevant is always first
+        if 'drop_irrelevant' in techniques and techniques[0] != 'drop_irrelevant':
+            techniques.remove('drop_irrelevant')
+            techniques = ['drop_irrelevant'] + techniques
+
+        # # Ensure that linear_residuals is always last
+        # if 'linear_residuals' in techniques:
+        #     techniques.remove('linear_residuals')
+        #     techniques = techniques + ['linear_residuals']
+
+        return techniques
+
+    def get_base_scores(self, X: pd.DataFrame, y: pd.Series):
+        if self.verbose:
+            print('Fit base model.')
         self.scores['full'] = {}
-        # if sum(X.nunique()==2)!=X.shape[1]:
-        self.scores['full'][f'lgb-{self.lgb_model_type}'], base_preds, base_feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type)
+        # TODO: Check whether we need to return preds & importances
+        # TODO: Adjust names of self.scores entries
+        res = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type)
+        self.scores['full'][f'lgb-{self.lgb_model_type}'] = res['scores']
+        base_preds, base_feature_importances = res['preds'], res['importances']
+        return base_feature_importances, base_preds
 
-        if 'quantile_reg' in self.engineering_techniques:
-            self.scores['full'][f'quantile_1'], q_preds, q_imp = self.get_lgb_performance(X, y, lgb_model_type='quantile_1')
-            self.scores['full'][f'quantile_3'], q_preds, q_imp = self.get_lgb_performance(X, y, lgb_model_type='quantile_3')
-            self.scores['full'][f'quantile_5'], q_preds, q_imp = self.get_lgb_performance(X, y, lgb_model_type='quantile_5')
-            self.scores['full'][f'quantile_9'], q_preds, q_imp = self.get_lgb_performance(X, y, lgb_model_type='quantile_9')
-            # if np.mean(self.scores['full'][f'quantile_9']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-            #     pass
+    def detect_quantile_regression(self, X: pd.DataFrame, y: pd.Series):
+        # TODO: Implement quantile regression properly
+        self.scores['full'][f'quantile_1'] = self.get_lgb_performance(X, y, lgb_model_type='quantile_1')['scores']
+        self.scores['full'][f'quantile_3'] = self.get_lgb_performance(X, y, lgb_model_type='quantile_3')['scores']
+        self.scores['full'][f'quantile_5'] = self.get_lgb_performance(X, y, lgb_model_type='quantile_5')['scores']
+        self.scores['full'][f'quantile_9'] = self.get_lgb_performance(X, y, lgb_model_type='quantile_9')['scores']
 
-        if 'linear_residuals' in self.engineering_techniques:
-            if self.target_type != 'multiclass':
-                self.scores['full'][f'linear'], linear_preds = self.cv_func(X, y, Pipeline([
-                    ('model', CustomLinearModel(target_type=self.target_type))
-                ]), return_preds=True)
-                if np.mean(self.scores['full'][f'linear']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-                    all_linear_preds = pd.concat(linear_preds).sort_index()
-                    lin_residuals = y - all_linear_preds
+    def detect_linear_residuals(self, X: pd.DataFrame, y: pd.Series):
+        res = self.cv_func(X, y, Pipeline([
+            ('model', CustomLinearModel(target_type=self.target_type))
+        ]), return_preds=True)
+        self.scores['full'][f'linear'], linear_preds = res['scores'], res['preds']
+        
+        if True: #np.mean(self.scores['full'][f'linear']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
+            all_linear_preds = pd.concat(linear_preds).sort_index()
+            lin_residuals = y - all_linear_preds
 
-                    self.scores['lin_residuals'] = {}
-                    self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}'], res_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, residuals='linear_residuals', scale_y='linear_residuals')
-                    # self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}'], res_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, residuals=lin_residuals)
-                    # if target_type != 'regression':
-                    #     self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[res_pred.index],lin_pred+res_pred) for lin_pred,res_pred in zip(linear_preds,res_preds)])                
-                    if np.mean(self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-                        self.linear_residual_model = CustomLinearModel(target_type=self.target_type).fit(X, y)
-                        # self.linear_residual_model = CustomLinearModel(target_type=self.target_type)
-                        self.linear_residuals = True
+            self.scores['lin_residuals'] = {}
+            self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}'] = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, residuals='linear_residuals', scale_y='linear_residuals')['scores']
+            # self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}'], res_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, residuals=lin_residuals)
+            # if target_type != 'regression':
+            #     self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[res_pred.index],lin_pred+res_pred) for lin_pred,res_pred in zip(linear_preds,res_preds)])                
+            if np.mean(self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
+                self.linear_residual_model = CustomLinearModel(target_type=self.target_type).fit(X, y)
+                # self.linear_residual_model = CustomLinearModel(target_type=self.target_type)
+                
 
-                        print(pd.DataFrame({col: pd.DataFrame(self.scores[col]).mean().sort_values() for col in self.scores}).transpose().sort_values('lgb-default'))
+                # print(pd.DataFrame({col: pd.DataFrame(self.scores[col]).mean().sort_values() for col in self.scores}).transpose().sort_values('lgb-default'))
 
-        if 'duplicate_mapping' in self.engineering_techniques and X.shape[1] < 1000:
-            n_X_duplicates = X.duplicated().mean()
-            n_Xy_duplicates = pd.concat([X,y],axis=1).duplicated().mean()
+    def detect_duplicate_mapping(self, X: pd.DataFrame, y: pd.Series):
+        n_X_duplicates = X.duplicated().mean()
+        n_Xy_duplicates = pd.concat([X,y],axis=1).duplicated().mean()
 
-            # if n_X_duplicates > 0.0 and self.target_type != 'multiclass': #and n_X_duplicates == n_Xy_duplicates:
-            if n_X_duplicates > 0.1 and (n_X_duplicates-n_Xy_duplicates)<0.01 and self.target_type != 'multiclass': #and n_X_duplicates == n_Xy_duplicates:
-                self.post_predict_duplicate_mapping = True
-                X_str = X.astype(str).sum(axis=1)
-                if self.target_type in ['regression', 'binary']:
-                    self.dupe_map = dict(y.groupby(X_str).mean())
-                    if round(n_X_duplicates,2) != round(n_Xy_duplicates,2):
-                        cnt_map = dict(y.groupby(X_str).count())
-                        self.dupe_map = {k: v for k, v in self.dupe_map.items() if cnt_map[k] > 1}
-                        dupe_min = dict(y.groupby(X_str).min())
-                        dupe_max = dict(y.groupby(X_str).max())
-                        self.dupe_map = {k: v for k, v in self.dupe_map.items() if dupe_min[k]==dupe_max[k]}
-                # if self.target_type == 'binary':
-                #     self.dupe_map = dict(y.groupby(X_str).mean())
-                #     dupe_min = dict(y.groupby(X_str).min())
-                #     dupe_max = dict(y.groupby(X_str).max())
-                #     self.dupe_map = {k: v for k, v in self.dupe_map.items() if dupe_min[k]==dupe_max[k]}
-                elif self.target_type == 'multiclass':
-                    # TODO: Implement approach properly for multiclass
-                    self.post_predict_duplicate_mapping = False
-                    y_orig = pd.Series(self.multiclass_encoder.inverse_transform(y))
-                    self.dupe_map = dict(y_orig.groupby(X_str).apply(lambda x: (sum(x==y_orig.loc[x.idxmax()])/len(x))))
-                    self.dupe_mode = dict(y_orig.groupby(X_str).apply(lambda x: x.mode().values[0]))
+        self.post_predict_duplicate_mapping = True
+        X_str = X.astype(str).sum(axis=1)
+        if self.target_type in ['regression', 'binary']:
+            self.dupe_map = dict(y.groupby(X_str).mean())
+            if round(n_X_duplicates,2) != round(n_Xy_duplicates,2):
+                cnt_map = dict(y.groupby(X_str).count())
+                self.dupe_map = {k: v for k, v in self.dupe_map.items() if cnt_map[k] > 1}
+                dupe_min = dict(y.groupby(X_str).min())
+                dupe_max = dict(y.groupby(X_str).max())
+                self.dupe_map = {k: v for k, v in self.dupe_map.items() if dupe_min[k]==dupe_max[k]}
+        # if self.target_type == 'binary':
+        #     self.dupe_map = dict(y.groupby(X_str).mean())
+        #     dupe_min = dict(y.groupby(X_str).min())
+        #     dupe_max = dict(y.groupby(X_str).max())
+        #     self.dupe_map = {k: v for k, v in self.dupe_map.items() if dupe_min[k]==dupe_max[k]}
+        elif self.target_type == 'multiclass':
+            # TODO: Implement approach properly for multiclass
+            self.post_predict_duplicate_mapping = False
+            y_orig = pd.Series(self.multiclass_encoder.inverse_transform(y))
+            self.dupe_map = dict(y_orig.groupby(X_str).apply(lambda x: (sum(x==y_orig.loc[x.idxmax()])/len(x))))
+            self.dupe_mode = dict(y_orig.groupby(X_str).apply(lambda x: x.mode().values[0]))
 
-                if len(self.dupe_map)>0:
-                    print(n_X_duplicates, n_Xy_duplicates, len(self.dupe_map))
-                # TODO: Add the option to use post_predict transformers in my CV
-                # TODO: Add post_predict transformers to the pipeline
-                # if f'lgb-{lgb_model_use}' not in self.scores['full']:
-                #     self.scores['full'][f'lgb-{lgb_model_use}'], full_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=lgb_model_use)
+        # if len(self.dupe_map)>0:
+        #     print(n_X_duplicates, n_Xy_duplicates, len(self.dupe_map))
+        # TODO: Add the option to use post_predict transformers in my CV
+        # TODO: Add post_predict transformers to the pipeline
+        # if f'lgb-{lgb_model_use}' not in self.scores['full']:
+        #     self.scores['full'][f'lgb-{lgb_model_use}'], full_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=lgb_model_use)
+        # 
 
-        # 1. Detect irrelevant features
-        # TODO: Add AG method here
-        if 'drop_irrelevant' in self.engineering_techniques:
-            self.irrelevant_feature_importances = pd.DataFrame(base_feature_importances).mean().sort_values()
-
-            # TODO: Add as a preprocessor
-            self.drop_cols.extend(self.irrelevant_feature_importances[self.irrelevant_feature_importances < self.alpha].index.tolist())
-            self.base_transformers.append('drop_irrelevant')
-
-        X = X.drop(columns=self.drop_cols, errors='ignore', axis=1)
-        X_bin = X[X.columns[X.nunique()<=2]]
+    def detect_cat_interactions(self, X: pd.DataFrame, y: pd.Series):
+        # TODO: Refactor
         X_cat = X[X.columns[X.nunique()>2]].select_dtypes(include=['object', 'category'])
+        # TODO: Add residual behavior
+        # if self.use_residuals:
+        #     residuals = y-pd.concat(base_preds).sort_index()
+        curr_comp = 'full'
+        best_catint_order = 1
+        use_freq = {}
+        for order in range(2,4): # TODO: Add max_order as parameter
+            if len(X_cat.columns) >= order:
+                self.scores[f'cat_int{order}'] = {}
+                self.scores[f'cat_int{order}_andFreq'] = {}
+                # self.scores[f'cat_int{order}_onlyFreq'] = {}
+
+                if self.use_residuals:
+                    res = self.get_lgb_performance(X, y, custom_prep=[CatIntAdder(self.target_type, max_order=order, use_filters=False)], lgb_model_type=self.lgb_model_type, residuals=residuals)
+                    self.scores[f'cat_int{order}'][f'lgb-{self.lgb_model_type}'], int_preds = res['scores'], res['preds']
+
+                    if self.target_type != 'regression':
+                        self.scores[f'cat_int{order}'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in int_preds])
+                    # TODO: Add some additional test to not always attempt +freq
+                    # I.e., only if the previous order was better with freq
+                    res = self.get_lgb_performance(X, y, custom_prep=[CatIntAdder(self.target_type, max_order=order, add_freq=True, use_filters=False)], lgb_model_type=self.lgb_model_type, residuals=residuals)
+                    self.scores[f'cat_int{order}_andFreq'][f'lgb-{self.lgb_model_type}'], intfreq_preds = res['scores'], res['preds']
+                    if self.target_type != 'regression':
+                        self.scores[f'cat_int{order}_andFreq'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in intfreq_preds])
+                else:
+                    res = self.get_lgb_performance(X, y, custom_prep=[CatIntAdder(self.target_type, max_order=order, use_filters=False)], lgb_model_type=self.lgb_model_type)
+                    self.scores[f'cat_int{order}'][f'lgb-{self.lgb_model_type}'], int_preds = res['scores'], res['preds']
+                    
+                    res = self.get_lgb_performance(X, y, custom_prep=[CatIntAdder(self.target_type, max_order=order, add_freq=True, use_filters=False)], lgb_model_type=self.lgb_model_type)
+                    self.scores[f'cat_int{order}_andFreq'][f'lgb-{self.lgb_model_type}'], intfreq_preds = res['scores'], res['preds']
+
+                andFreq_beats_int = np.mean(self.scores[f'cat_int{order}_andFreq'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores[f'cat_int{order}'][f'lgb-{self.lgb_model_type}'])
+                andFreq_beats_base = np.mean(self.scores[f'cat_int{order}_andFreq'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores[curr_comp][f'lgb-{self.lgb_model_type}'])
+                int_beats_base = np.mean(self.scores[f'cat_int{order}'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores[curr_comp][f'lgb-{self.lgb_model_type}'])
+
+                if andFreq_beats_int and andFreq_beats_base:
+                    curr_comp = f'cat_int{order}_andFreq'
+                    best_catint_order = order
+                    use_freq[order] = True
+                    residuals = y - pd.concat(intfreq_preds).sort_index()
+                elif int_beats_base:
+                    curr_comp = f'cat_int{order}'
+                    best_catint_order = order
+                    use_freq[order] = False
+                    residuals = y - pd.concat(int_preds).sort_index()
+                else:
+                    break
+        if best_catint_order > 1:
+            # TODO: Add post-hoc adjustment to drop unused features
+            self.transformers.append(CatIntAdder(self.target_type, max_order=best_catint_order, add_freq=use_freq[best_catint_order], use_filters=False).fit(X, y))
+
+    def detect_num_interactions(self, X: pd.DataFrame, y: pd.Series, base_preds: pd.Series, candidate_cols: List[str] = None):
         X_num = X[X.columns[X.nunique()>2]].select_dtypes(exclude=['object', 'category'])
 
-        assert X_cat.shape[1] + X_num.shape[1] + X_bin.shape[1] ==  X.shape[1], "Not all features covered through num/cat selection."
-
-        # Cat-as-num detection
-        if 'cat_as_num' in self.engineering_techniques:            
-            if len(X_cat.columns) > 0:
-                self.scores['cat_as_num'] = {}
-                self.scores['cat_as_num'][f'lgb-{self.lgb_model_type}'], preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, custom_prep=[CatAsNumTransformer()])
-
-                if np.mean(self.scores['cat_as_num'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-                    self.base_transformers.append(CatAsNumTransformer().fit(X))
-                    X = self.cat_as_num(X)
-                    X_bin = X[X.columns[X.nunique()<=2]]
-                    X_cat = X[X.columns[X.nunique()>2]].select_dtypes(include=['object', 'category'])
-                    X_num = X[X.columns[X.nunique()>2]].select_dtypes(exclude=['object', 'category'])
-
-        # Cat-as-loo detection
-        # if 'cat_as_loo' in self.engineering_techniques:
-        #     if len(X_cat.columns) > 0:
-        #         self.scores['cat_as_loo'] = {}
-        #         self.scores['cat_as_loo']['lgb-default'], preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, custom_prep=[CatLOOTransformer()])
-
-        #         if np.mean(self.scores['cat_as_loo']['lgb-default']) > np.mean(self.scores['full']['lgb-default']):
-        #             self.base_transformers.append(CatLOOTransformer().fit(X))
-
-        # 2. Categorical frequency
-        if 'cat_freq' in self.engineering_techniques:
-            if len(X_cat.columns) > 0:
-                cat_freq = FreqAdder()
-                candidate_cols = cat_freq.filter_candidates_by_distinctiveness(X_cat)
-                if len(candidate_cols) > 0:
-                    self.scores['cat_freq'] = {}
-                    self.scores['cat_freq'][f'lgb-{self.lgb_model_type}'], preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[FreqAdder(candidate_cols=candidate_cols)], lgb_model_type=self.lgb_model_type)
-
-                    if np.mean(self.scores['cat_freq'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-                        self.transformers.append(FreqAdder(candidate_cols=candidate_cols).fit(X, y))
-                        self.transformers_unfitted.append(FreqAdder(candidate_cols=candidate_cols))
-        ######## EXPERIMENTAL PART ########
-        if 'SVD' in self.engineering_techniques:
-            self.scores[f'svd'] = {}
-            self.scores[f'svd'][f'lgb-{self.lgb_model_type}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[SVDConcatTransformer()], lgb_model_type=self.lgb_model_type)
-
-            if np.mean(self.scores[f'svd'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-                self.transformers.append(SVDConcatTransformer().fit(X, y))
-                self.transformers_unfitted.append(SVDConcatTransformer())
-
-        # elif 'SVD-TTA' in self.engineering_techniques:
-        #     self.transformers.append('SVD-TTA')
-        # self.scores['full']['lgb-default-numeric'], preds, feature_importances = self.get_lgb_performance(X.astype(float), y, lgb_model_type='default')        
-        # self.scores['full']['lgb-default-tabpfn-SVD'], preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type='default', custom_prep=[SVDConcatTransformer()])
-        # self.scores['full']['lgb-default-tabpfn-SVD-TTA'], preds, feature_importances = self.get_lgb_performance(SVDConcatTransformer().fit_transform(X.astype(float)), y, lgb_model_type='default', )
-        # self.scores['full']['lgb-default-tabpfn-SVD'], preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type='default', custom_prep=[SVDConcatTransformer()])
-        # self.scores['full']['lgb-default-tabpfn-SVD-TTA'], preds, feature_importances = self.get_lgb_performance(SVDConcatTransformer().fit_transform(X), y, lgb_model_type='default', )
-
-        # # 3. Categorical interactions
-        if 'cat_int' in self.engineering_techniques:
-            if len(X_cat.columns) > 1 and sum(X_cat.nunique() > 5)>2: # TODO: Make this a hyperparameter
-                if self.use_residuals:
-                    residuals = y-pd.concat(base_preds).sort_index()
-                curr_comp = 'full'
-                best_catint_order = 1
-                use_freq = {}
-                for order in range(2,4): # TODO: Add max_order as parameter
-                    if len(X_cat.columns) >= order:
-                        self.scores[f'cat_int{order}'] = {}
-                        self.scores[f'cat_int{order}_andFreq'] = {}
-                        # self.scores[f'cat_int{order}_onlyFreq'] = {}
-
-                        if self.use_residuals:
-                            self.scores[f'cat_int{order}'][f'lgb-{self.lgb_model_type}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[CatIntAdder(self.target_type, max_order=order, use_filters=False)], lgb_model_type=self.lgb_model_type, residuals=residuals)
-                            if target_type != 'regression':
-                                self.scores[f'cat_int{order}'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in int_preds])
-                            # TODO: Add some additional test to not always attempt +freq
-                            # I.e., only if the previous order was better with freq
-                            self.scores[f'cat_int{order}_andFreq'][f'lgb-{self.lgb_model_type}'], intfreq_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[CatIntAdder(self.target_type, max_order=order, add_freq=True, use_filters=False)], lgb_model_type=self.lgb_model_type, residuals=residuals)
-                            if target_type != 'regression':
-                                self.scores[f'cat_int{order}_andFreq'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in intfreq_preds])
-                        else:
-                            self.scores[f'cat_int{order}'][f'lgb-{self.lgb_model_type}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[CatIntAdder(self.target_type, max_order=order, use_filters=False)], lgb_model_type=self.lgb_model_type)
-                            self.scores[f'cat_int{order}_andFreq'][f'lgb-{self.lgb_model_type}'], intfreq_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[CatIntAdder(self.target_type, max_order=order, add_freq=True, use_filters=False)], lgb_model_type=self.lgb_model_type)
-
-                        andFreq_beats_int = np.mean(self.scores[f'cat_int{order}_andFreq'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores[f'cat_int{order}'][f'lgb-{self.lgb_model_type}'])
-                        andFreq_beats_base = np.mean(self.scores[f'cat_int{order}_andFreq'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores[curr_comp][f'lgb-{self.lgb_model_type}'])
-                        int_beats_base = np.mean(self.scores[f'cat_int{order}'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores[curr_comp][f'lgb-{self.lgb_model_type}'])
-
-                        if andFreq_beats_int and andFreq_beats_base:
-                            curr_comp = f'cat_int{order}_andFreq'
-                            best_catint_order = order
-                            use_freq[order] = True
-                            residuals = y - pd.concat(intfreq_preds).sort_index()
-                        elif int_beats_base:
-                            curr_comp = f'cat_int{order}'
-                            best_catint_order = order
-                            use_freq[order] = False
-                            residuals = y - pd.concat(int_preds).sort_index()
-                        else:
-                            break
-                if best_catint_order > 1:
-                    # TODO: Add post-hoc adjustment to drop unused features
-                    self.transformers.append(CatIntAdder(self.target_type, max_order=best_catint_order, add_freq=use_freq[best_catint_order], use_filters=False).fit(X, y))
-                    self.transformers_unfitted.append(CatIntAdder(self.target_type, max_order=best_catint_order, add_freq=use_freq[best_catint_order], use_filters=False))
-
-        # 4. Categorical GroupBy interactions
-        if 'cat_groupby' in self.engineering_techniques:
-            min_cardinality = 5 # TODO: Make this a hyperparameter
-            if len(X_cat.columns) > 1 and sum(X_cat.nunique() >= min_cardinality)>2: # TODO: Test to filter low-cardinality for groupby
-                if self.use_residuals:
-                    residuals = y-pd.concat(base_preds).sort_index()
-                
-                self.scores[f'cat_groupby'] = {}
-                if self.use_residuals:
-                    self.scores[f'cat_groupby'][f'lgb-{self.lgb_model_type}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[CatGroupByAdder(min_cardinality=min_cardinality)], lgb_model_type=self.lgb_model_type, residuals=residuals)
-                    if target_type != 'regression':
-                        self.scores[f'cat_groupby'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in int_preds])                    
-                else:
-                    self.scores[f'cat_groupby'][f'lgb-{self.lgb_model_type}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[CatGroupByAdder(min_cardinality=min_cardinality)], lgb_model_type=self.lgb_model_type)
-
-                if np.mean(self.scores[f'cat_groupby'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-                    self.transformers.append(CatGroupByAdder(min_cardinality=min_cardinality).fit(X, y))
-
-        # 5. Numerical interactions
-        num_int=False
-        if 'num_int' in self.engineering_techniques:
-            if len(X_num.columns) > 1 and sum(X_num.nunique() > 5)>2: # TODO: Make this a hyperparameter
-                if self.use_residuals:
-                    residuals = y-pd.concat(base_preds).sort_index()
-                curr_comp = 'full'
-                
-                imp_df = pd.DataFrame(base_feature_importances).mean()
-                candidate_cols = imp_df.loc[X_num.columns].sort_values(ascending=False).head(100).index.tolist()
-                
-                prep_args = {}
-                best_order = 1
-                for order in range(2,3): # TODO: Add max_order as parameter
-                    if len(X_num.columns) >= order:
-                        self.scores[f'num_int{order}'] = {}
-                        
-                        prep_args[order] = {
-                            'target_type': self.target_type, 
-                            'max_order': 3, 
-                            'num_operations': 'all',
-                            'use_mvp': False,
-                            'corr_thresh': .95,
-                            'select_n_candidates': 2000,
-                            'apply_filters': False,
-                            'candidate_cols': candidate_cols,
-                            'min_cardinality': 3,
-                        }
-
-                        preprocessor = NumericalInteractionDetector(
-                            **prep_args[order]
-                        )
-
-                        if self.use_residuals:
-                            self.scores[f'num_int{order}'][f'lgb-{self.lgb_model_type}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[preprocessor], lgb_model_type=self.lgb_model_type, residuals=residuals)
-                            if target_type != 'regression':
-                                self.scores[f'num_int{order}'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in int_preds])                    
-                        else:
-                            self.scores[f'num_int{order}'][f'lgb-{self.lgb_model_type}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[preprocessor], lgb_model_type=self.lgb_model_type)
-
-                        if np.mean(self.scores[f'num_int{order}'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores[curr_comp][f'lgb-{self.lgb_model_type}']):
-                            curr_comp = f'num_int{order}'
-                            best_order = order
-                            if self.use_residuals:
-                                residuals = y - pd.concat(int_preds).sort_index()
-                        else:
-                            break
-
-                if best_order > 1:
-                    self.transformers.append(
-                        NumericalInteractionDetector(
-                            **prep_args[best_order]
-                        ).fit(X, y)
-                        )
-                    num_int = True
-                
+        if base_preds is not None:
+            residuals = y - base_preds
+        else:
+            residuals = None
         
-        # 6. Cat-by-NUM GroupBy interactions
-        if 'groupby' in self.engineering_techniques:
-            if len(X_cat.columns) > 0 and any(X_cat.nunique() > 5) and len(X_num.columns) > 0 and any(X_num.nunique() > 5): # TODO: Test to filter low-cardinality for groupby
-                if self.use_residuals:
-                    residuals = y-pd.concat(base_preds).sort_index()
+        curr_comp = 'full'
+                        
+        prep_args = {}
+        best_order = 1
+        for order in range(2,3): # TODO: Add max_order as parameter
+            if len(X_num.columns) >= order:
+                self.scores[f'num_int{order}'] = {}
                 
+                prep_args[order] = {
+                    'target_type': self.target_type, 
+                    'max_order': 3, 
+                    'num_operations': 'all',
+                    'use_mvp': False,
+                    'corr_thresh': .95,
+                    'select_n_candidates': 2000,
+                    'apply_filters': False,
+                    'candidate_cols': candidate_cols,
+                    'min_cardinality': 3,
+                }
+
+                preprocessor = NumericalInteractionDetector(
+                    **prep_args[order]
+                )
+
+                # TODO: Get rid of code dupe and move parts to detect_general
+                if self.use_residuals:
+                    res = self.get_lgb_performance(X, y, custom_prep=[preprocessor], lgb_model_type=self.lgb_model_type, residuals=residuals)
+                    self.scores[f'num_int{order}'][f'lgb-{self.lgb_model_type}'], int_preds = res['scores'], res['preds']
+                    if self.target_type != 'regression':
+                        self.scores[f'num_int{order}'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in int_preds])                    
+                else:
+                    res = self.get_lgb_performance(X, y, custom_prep=[preprocessor], lgb_model_type=self.lgb_model_type)
+                    self.scores[f'num_int{order}'][f'lgb-{self.lgb_model_type}'], int_preds = res['scores'], res['preds']
+
+                if np.mean(self.scores[f'num_int{order}'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores[curr_comp][f'lgb-{self.lgb_model_type}']):
+                    curr_comp = f'num_int{order}'
+                    best_order = order
+                    if self.use_residuals:
+                        residuals = y - pd.concat(int_preds).sort_index()
+                else:
+                    break
+
+        if best_order > 1:
+            self.transformers.append(
+                NumericalInteractionDetector(
+                    **prep_args[best_order]
+                ).fit(X, y)
+                )
+
+    def detect_bin_summarize(self, X: pd.DataFrame, y: pd.Series, base_preds: pd.Series, base_feature_importances: List[pd.Series]):
+        # TODO: Test whether this even makes sense
+        if self.use_residuals:
+            residuals = y - base_preds
+        imp_df = pd.DataFrame(base_feature_importances).mean().sort_values(ascending=False)
+        
+        X_new = X.copy()    
+        for i in range(1, 10):
+            start_col = imp_df.index[i]
+            X_curr = X[start_col].astype(float)
+            curr_ll = log_loss(y,LeaveOneOutEncoder().fit_transform(X[start_col],y))
+            use_cols = [start_col]
+            drop_cols = imp_df.index[:i].tolist()
+            new_ll = -np.inf
+            for col in imp_df.index[i:]:
+                # print(f"\rBinary FE: {len(use_cols)}/{imp_df.index[i:]} columns processed, current performance={curr_ll:.4f}, new performance={new_ll:.4f}", end="", flush=True)
+                X_cand = X.drop(columns=drop_cols+use_cols, errors='ignore').astype(float)
+                loo = LeaveOneOutEncoder().fit_transform((X_cand.transpose() + X_curr.values).transpose().astype('U'), y)
+                loo_perf = pd.Series({col: log_loss(y,loo[col]) for col in loo.columns}).sort_values()
+
+                new_ll = loo_perf.iloc[0]
+                if new_ll < curr_ll:
+                    use_cols.append(loo_perf.index[0])
+                    X_curr = X_curr + X_cand[loo_perf.index[0]]
+                    curr_ll = new_ll
+                else:
+                    X_new[f'sum{i}'] = X[use_cols].astype(float).sum(axis=1)
+                    break
+
+        self.scores['bin-sum'] = {}
+        self.scores['bin-sum'][f'lgb-{self.lgb_model_type}'] = self.get_lgb_performance(X_new, y, lgb_model_type=self.lgb_model_type)['scores']
+
+    def detect_general(self, X: pd.DataFrame, y: pd.Series, get_technique: Callable, technique_name: str, add_to_running: bool = False, base_preds: pd.Series = None):
+        '''
+        Currently tested for cat_as_num, cat_freq, 
+        '''
+        # TODO: Add option to continue training from base preds instead of using residuals
+        if base_preds is not None:
+            residuals = y - base_preds
+        else:
+            residuals = None
+
+        self.scores[technique_name] = {}
+        custom_prep = self.preprocessors_running + [get_technique()]
+        res = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, custom_prep=custom_prep, residuals=residuals)
+        self.scores[technique_name][f'lgb-{self.lgb_model_type}'], preds = res['scores'], res['preds']
+
+        if self.target_type != 'regression' and base_preds is not None:
+            self.scores[technique_name][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in preds])
+
+        if np.mean(self.scores[technique_name][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
+            if add_to_running:
+                self.base_transformers.append(get_technique().fit(X))
+                self.preprocessors_running.append(get_technique())
+            else:
+                self.transformers.append(get_technique().fit(X, y))
+
+    def fit(self, X_input: pd.DataFrame, y_input: pd.Series = None):
+        '''
+        When implementing a new engineering technique, please ensure that it is properly integrated into the following functions:
+        - registered_techniques: Ensure that the technique is added to the list 
+        - filter_techniques: Ensure that the technique is only applied when applicable to the dataset
+        - adjust_detection_order: Ensure that the technique is applied in a sensible order (e.g., drop_irrelevant should be first)
+        - The actual detection function (e.g., detect_cat_interactions)
+        - The actual transformer (e.g., CatIntAdder)
+
+        '''
+        # TODO: Add functionality to resume fitting with additional preprocessors, after the model was fitted once
+        # Ensure correct data format
+        if not isinstance(X_input, pd.DataFrame):
+            X_input = pd.DataFrame(X_input)
+        if not isinstance(y_input, pd.Series):
+            y_input = pd.Series(y_input)
+        X = X_input.copy()
+        y = y_input.copy()
+
+        y = adjust_target_format(y=y, target_type = self.target_type) 
+
+        # TODO: Verify that this block is truly not needed, also in base preprocessors functions
+        # Save some properties of the original input data
+        # self.orig_dtypes = {col: "categorical" if dtype in ["object", "category", str] else "numeric" for col,dtype in dict(X.dtypes).items()}
+        # for col in self.orig_dtypes:
+        #     if X[col].nunique()<=2:
+        #         self.orig_dtypes[col] = "binary"
+        # self.original_cat_features = [key for key, value in self.orig_dtypes.items() if value == "categorical"]
+        # self.col_names = X.columns
+        # self.changes_to_cols = {col: "None" for col in self.col_names}
+        # self.changes_to_cols = {col: "raw" for col in self.col_names} 
+
+        # Apply basic steps from AG preprocessing 
+        X = self.prefilter_X(X)
+
+        # Check which of the specified engineering techniques are applicable to the dataset
+        # FIXME: Need a global function to filter to engineering techniques that will be applied and only fit the full model if necessary
+        applicable_techniques = self.filter_techniques(X, y)
+        
+        if len(applicable_techniques) > 0:
+            applicable_techniques = self.adjust_detection_order(applicable_techniques)
+            
+            # TODO: Check whether preds & base importance is always needed
+            base_feature_importances, base_preds_lst = self.get_base_scores(X, y) 
+
+            if self.use_residuals:
+                base_preds = pd.concat(base_preds_lst).sort_index()
+            else:
+                base_preds = None
+
+        skip_techniques = []
+        for t in applicable_techniques:
+            # TODO: Make add_to_running a global hyperparameter and adjust functions that would change the data to be feature adding functions instead
+            if t in skip_techniques:
+                continue
+            if self.verbose:
+                print(f"Test engineering technique: {t}")
+            if t == 'drop_irrelevant':
+                # TODO: Consider replacing with AG method here
+                self.irrelevant_feature_importances = pd.DataFrame(base_feature_importances).mean().sort_values()
+                # TODO: Add as a preprocessor
+                self.drop_cols.extend(self.irrelevant_feature_importances[self.irrelevant_feature_importances < self.technique_params['drop_irrelevant']['irrelevant_threshold']].index.tolist())
+                X = X.drop(columns=self.drop_cols, errors='ignore', axis=1)
+            elif t == 'quantile_reg':
+                self.detect_quantile_regression(X, y)
+            elif t == 'linear_residuals':
+                self.detect_linear_residuals(X, y)
+            elif t == 'duplicate_mapping':
+                self.detect_duplicate_mapping(X, y)
+            elif t == 'cat_as_num':
+                self.detect_general(X, y, lambda: CatAsNumTransformer(), 'cat_as_num', add_to_running=True, base_preds=base_preds)
+                if np.mean(self.scores[t][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
+                    # Remove all further cat engineering techniques after 'cat_as_num'
+                    cat_techniques = ['cat_freq', 'cat_as_loo', 'cat_as_ohe', 'cat_int', 'cat_groupby']
+                    idx = applicable_techniques.index('cat_as_num')
+                    # Skip cat techniques after 'cat_as_num' if conversion happens
+                    skip_techniques.extend([t for t in applicable_techniques[idx+1:] if t in cat_techniques])
+            elif t == 'cat_freq':
+                # TODO: avoid testing for distinctive cat freq twice (currently also done during technique filtering). Could be done by saving candidate_cols and explicitly providing them
+                self.detect_general(X, y, lambda: FreqAdder(), 'cat_freq', add_to_running=False, base_preds=base_preds)
+            # TODO: Properly integrate cat_as_loo and cat_as_ohe
+            elif t == 'cat_as_loo':
+                self.detect_general(X, y, lambda: CatLOOTransformer(), 'cat_as_loo', add_to_running=False, base_preds=base_preds)
+            elif t == 'cat_as_ohe':
+                # TODO: Might consider using from tabprep.preprocessors import FrequencyOHE
+
+                self.detect_general(X, y, lambda: CatOHETransformer(), 'cat_as_ohe', add_to_running=False, base_preds=base_preds)
+            elif t == 'SVD':
+                self.detect_general(X, y, lambda: SVDConcatTransformer(), 'SVD', add_to_running=False, base_preds=base_preds)
+            elif t == 'cat_int':
+                self.detect_cat_interactions(X, y)
+            elif t == 'cat_groupby':
+                self.detect_general(X, y, lambda: CatGroupByAdder(min_cardinality=self.min_cardinality), 'cat_groupby', add_to_running=False, base_preds=base_preds)
+            elif t == 'num_int':
+                imp_df = pd.DataFrame(base_feature_importances).mean()
+                num_cols = X[X.columns[X.nunique()>2]].select_dtypes(exclude=['object', 'category']).columns.tolist()
+                candidate_cols = imp_df.loc[num_cols].sort_values(ascending=False).head(100).index.tolist()
+                self.detect_num_interactions(X, y, base_preds=base_preds, candidate_cols=candidate_cols)
+            elif t == 'groupby':
                 prep_params = {
                     'target_type': self.target_type,
-                    'min_cardinality': 6,
+                    'min_cardinality': self.min_cardinality,
                     'use_mvp': False,
                     'mean_difference': True,
                     'num_as_cat': False,
                 }
+                self.detect_general(X, y, lambda: GroupByFeatureEngineer(**prep_params), 'groupby', add_to_running=False, base_preds=base_preds)
+            elif t == 'bin_summarize':
+                self.detect_bin_summarize(X, y, base_preds=base_preds, base_feature_importances=base_feature_importances)
+            elif t == 'duplicate_count':
+                self.detect_general(X, y, lambda: DuplicateCountAdder(), 'duplicate_count', add_to_running=False, base_preds=base_preds)
+            elif t == 'linear_feature':
+                self.detect_general(X, y, lambda: LinearFeatureAdder(self.target_type, linear_model_type='lasso'), 'linear_feature', add_to_running=False, base_preds=base_preds)
+            else:
+                raise ValueError(f"Engineering technique {t} not recognized. Available techniques: {self.registered_techniques}")
 
-                preprocessor = GroupByFeatureEngineer(
-                    **prep_params
-                )
-
-                self.scores[f'groupby'] = {}
-                if self.use_residuals:
-                    self.scores[f'groupby'][f'lgb-{self.lgb_model_type}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[preprocessor], lgb_model_type=self.lgb_model_type, residuals=residuals)
-                    if target_type != 'regression':
-                        self.scores[f'groupby'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in int_preds])                    
-                else:
-                    self.scores[f'groupby'][f'lgb-{self.lgb_model_type}'], int_preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[preprocessor], lgb_model_type=self.lgb_model_type)
-
-                if np.mean(self.scores[f'groupby'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-                    self.transformers.append(GroupByFeatureEngineer(**prep_params).fit(X, y))
-                    print("!")        
-
-        # 7. Binary FE
-        if 'bin_summarize' in self.engineering_techniques:
-            if self.use_residuals:
-                residuals = y-pd.concat(base_preds).sort_index()
-            imp_df = pd.DataFrame(base_feature_importances).mean().sort_values(ascending=False)
-            
-            X_new = X.copy()    
-            for i in range(1, 10):
-                start_col = imp_df.index[i]
-                X_curr = X[start_col].astype(float)
-                curr_ll = log_loss(y,LeaveOneOutEncoder().fit_transform(X[start_col],y))
-                use_cols = [start_col]
-                drop_cols = imp_df.index[:i].tolist()
-                new_ll = -np.inf
-                for col in imp_df.index[i:]:
-                    print(f"\rBinary FE: {len(use_cols)}/{imp_df.index[i:]} columns processed, current performance={curr_ll:.4f}, new performance={new_ll:.4f}", end="", flush=True)
-                    X_cand = X.drop(columns=drop_cols+use_cols, errors='ignore').astype(float)
-                    loo = LeaveOneOutEncoder().fit_transform((X_cand.transpose() + X_curr.values).transpose().astype('U'), y)
-                    loo_perf = pd.Series({col: log_loss(y,loo[col]) for col in loo.columns}).sort_values()
-
-                    new_ll = loo_perf.iloc[0]
-                    if new_ll < curr_ll:
-                        use_cols.append(loo_perf.index[0])
-                        X_curr = X_curr + X_cand[loo_perf.index[0]]
-                        curr_ll = new_ll
-                    else:
-                        X_new[f'sum{i}'] = X[use_cols].astype(float).sum(axis=1)
-                        break
-
-            self.scores['bin-sum'] = {}
-            self.scores['bin-sum'][f'lgb-{self.lgb_model_type}'], full_preds, feature_importances = self.get_lgb_performance(X_new, y, lgb_model_type=self.lgb_model_type)
-
-        # if 'dupe_detection' in self.engineering_techniques:            
-        #     lgb_model_use = 'default'
-        #     if X.duplicated().sum() > 0:
-        #         self.scores['dupe_detect'] = {}
-        #         if num_int:
-        #             self.scores['dupe_detect'][f'lgb-{self.lgb_model_type}'], preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=lgb_model_use, custom_prep=[DuplicateCountAdder(), NumericalInteractionDetector(**prep_args[best_order])])
-        #             reference_config = f'num_int2'
-        #         else:
-        #             self.scores['dupe_detect'][f'lgb-{self.lgb_model_type}'], preds, feature_importances = self.get_lgb_performance(X, y, custom_prep=[DuplicateCountAdder()], lgb_model_type=lgb_model_use)
-        #             reference_config = 'full'
-        #         if np.mean(self.scores['dupe_detect'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores[reference_config][f'lgb-{self.lgb_model_type}']):
-        #             self.base_transformers.append(DuplicateCountAdder().fit(X))
-
-        # if 'linear_residuals' in self.engineering_techniques:
-        #     if self.target_type != 'multiclass':
-        #         self.scores['full'][f'linear'], linear_preds = self.cv_func(X, y, Pipeline([
-        #             ('model', CustomLinearModel(target_type=self.target_type))
-        #         ]), return_preds=True)
-        #         if np.mean(self.scores['full'][f'linear']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-        #             all_linear_preds = pd.concat(linear_preds).sort_index()
-        #             lin_residuals = y - all_linear_preds
-
-        #             self.scores['lin_residuals'] = {}
-        #             self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}'], res_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, residuals='linear_residuals', scale_y='linear_residuals')
-        #             # self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}'], res_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, residuals=lin_residuals)
-        #             # if target_type != 'regression':
-        #             #     self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}'] = np.array([self.scorer(y.iloc[res_pred.index],lin_pred+res_pred) for lin_pred,res_pred in zip(linear_preds,res_preds)])                
-        #             if np.mean(self.scores[f'lin_residuals'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-        #                 # self.linear_residual_model = CustomLinearModel(target_type=self.target_type).fit(X, y)
-        #                 self.linear_residual_model = CustomLinearModel(target_type=self.target_type)
-        #                 self.linear_residuals = True
-
-        #                 print(pd.DataFrame({col: pd.DataFrame(self.scores[col]).mean().sort_values() for col in self.scores}).transpose().sort_values('lgb-default'))
-                
-                # if self.target_type == 'regression' and 'linear_feature' in self.engineering_techniques:
-
-
-        if 'linear_feature' in self.engineering_techniques:
-            get_lm = lambda: LinearFeatureAdder(self.target_type, linear_model_type='lasso')
-            self.scores['full'][f'linear_feature'], full_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, custom_prep=[get_lm()])
-            # self.scores['full'][f'linear_feature'], full_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=lgb_model_use, custom_prep=[LinearFeatureAdder(self.target_type, linear_model_type='lasso')])
-
-            if np.mean(self.scores[f'full'][f'linear_feature']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-                self.transformers.append(get_lm().fit(X, y))
-                print("!")
-
-        # if self.target_type == 'regression':
-        #     self.scores['full'][f'closest'], close_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=lgb_model_use, reg_assign_closest_y=True)
-
-        if self.target_type == 'regression' and 'log_target' in self.engineering_techniques:
-            lgb_model_use = 'default'
-            if f'lgb-{lgb_model_use}' not in self.scores['full']:
-                self.scores['full'][f'lgb-{lgb_model_use}'], full_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=lgb_model_use)
-            self.scores['full'][f'log_target'], full_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=lgb_model_use, scale_y='log')
-
-            # if np.mean(self.scores[f'full'][f'log_target']) > np.mean(self.scores['full'][f'lgb-{lgb_model_use}']):
-            #     self.transformers.append(LinearFeatureAdder(self.target_type).fit(X, y))
-            #     print("!")            
-
-
-        # Cat-as-ohe detection
-        if 'freq_as_ohe' in self.engineering_techniques:            
-            if len(X_cat.columns) > 0: # and X_cat.nunique().max() > 100:
-                from tabprep.preprocessors import FrequencyOHE
-                self.scores['freq_as_ohe'] = {}
-                self.scores['freq_as_ohe'][f'lgb-{self.lgb_model_type}'], preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, custom_prep=[FrequencyOHE(min_freq=20)])
-
-                if np.mean(self.scores['freq_as_ohe'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-                    print('Use OHE')
-                    self.transformers.append(CatOHETransformer().fit(X))
-
-        # Cat-as-ohe detection
-        if 'cat_as_ohe' in self.engineering_techniques:            
-            if len(X_cat.columns) > 0: # and X_cat.nunique().max() > 100:
-                self.scores['cat_as_ohe'] = {}
-                # if 'cat_int' in self.engineering_techniques and best_catint_order > 1:
-                #     self.scores['cat_as_ohe'][f'lgb-{self.lgb_model_type}'], preds, feature_importances = self.get_lgb_performance(
-                #         X, y, lgb_model_type=self.lgb_model_type, 
-                #         custom_prep=[CatIntAdder(self.target_type, max_order=best_catint_order, add_freq=use_freq[best_catint_order], use_filters=False), 
-                #                      CatOHETransformer()])
-                # else:
-                self.scores['cat_as_ohe'][f'lgb-{self.lgb_model_type}'], preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=self.lgb_model_type, custom_prep=[CatOHETransformer()])
-
-                if np.mean(self.scores['cat_as_ohe'][f'lgb-{self.lgb_model_type}']) > np.mean(self.scores['full'][f'lgb-{self.lgb_model_type}']):
-                    print('Use OHE')
-                    self.transformers.append(CatOHETransformer().fit(X))
-
-
-        print("!")
         # TODO: Add rank, min, max to GroupBy interactions
         # TODO: Add technique to generate few but higher-order feature interactions
         # TODO: Add technique to find binary interactions
 
-        # EXP rounded_regression
-        # if 'round_reg' in self.engineering_techniques:
-        #     lgb_model_use = 'default'
-        #     if len(X_num.columns) > 1 and sum(X_num.nunique() > 5)>2: # TODO: Make this a hyperparameter
-        #         if f'lgb-{lgb_model_use}' not in self.scores['full']:
-        #             self.scores['full'][f'lgb-{lgb_model_use}'], full_preds, feature_importances = self.get_lgb_performance(X, y, lgb_model_type=lgb_model_use)
-                
-        #         self.scores[f'round_reg'] = {}
-        #         self.scores[f'round_reg'][f'lgb-{lgb_model_use}'], int_preds, feature_importances = self.get_lgb_performance(X, y.round(), lgb_model_type=lgb_model_use)
-        #         self.scores[f'round_reg'][f'lgb-{lgb_model_use}'] = np.array([self.scorer(y.iloc[y_pred.index],y_pred) for y_pred in int_preds])
-        # if best_order > 1:
-        #     self.transformers.append(CatIntAdder(self.target_type, max_order=best_order, add_freq=use_freq[best_order], use_filters=False).fit(X, y))
-
-        # self.scores['cat_groupby']['lgb-catint'], feature_importances = self.get_lgb_performance(X, y, custom_prep=[CatGroupByAdder()], lgb_model_type='catint')
-
-        # 1. Get all dummy-mean scores
-        # irrelevant_candidates = self.dummy_mean_test(X, y)
-        # self.get_dummy_mean_scores(X, y)
-
-        # 2. Get all combination scores
-        # comb_cols = self.combination_test(X, y, early_stopping=False)
-        
-        # 3. Get linear scores
-        # linear_cols = self.interpolation_test(X, y, max_degree=1)
-
-        # Apply categorical threshold test
-        # cat_threshold_test = self.cat_threshold_test(X, y)
-
-        # 4. Get weighted univariate scores
-        # self.feature_target_rep = dict(pd.DataFrame({col: pd.DataFrame(self.scores[col]).mean().sort_values() for col in self.scores}).idxmax())
-        # linear_model = Pipeline([
-        #     # PowerTransformer removes a few more features to be numeric than standaradscaler, mostly the very imbalanced ones
-        #     ("impute", SimpleImputer(strategy="median")),
-        #     ("standardize", StandardScaler()),
-        #     ("model", LinearRegression()) if self.target_type == 'regression' else ('model', LogisticRegression()),
-        # ])
-        # self.scores['full'] = {}
-        # self.scores['full']['target_rep'] = self.cv_func(X, y, linear_model, custom_prep=[TargetRepresenter(self.feature_target_rep, self.target_type)])
-
-        # 5. Get LGB on raw data scores
-        # self.scores['full']['lgb-catint'], feature_importances = self.get_lgb_performance(X, y, lgb_model_type='catint')
-
-        # 6. Remove entirely redundant features
-        # METHOD: LGBM feature importances with very strong feature bagging fraction
-
-        # 6. Define preprocessors to test
-        # pd.DataFrame(feature_importances).mean().sort_values(ascending=False)
-
-        ### CAT-GROUPBY INTERACTIONS
-        # X_new = CatGroupByAdder().fit_transform(X, y)
-        # new_cols = list(set(X_new.columns) - set(X.columns))
-        # self.get_target_rep_type(X_new[new_cols], y)
-        # for col in new_cols:
-        #     self.feature_target_rep[col] = 'raw'
-        # self.scores['cat_groupby'] = {}
-        # self.scores['cat_groupby']['target_rep'] = self.cv_func(
-        #     X, y, linear_model, 
-        #     custom_prep=
-        #     [
-        #         CatGroupByAdder(),
-        #         TargetRepresenter(self.feature_target_rep, self.target_type)
-        #         ])
-        # self.scores['cat_groupby']['lgb-catint'], feature_importances = self.get_lgb_performance(X, y, custom_prep=[CatGroupByAdder()], lgb_model_type='catint')
-        
-        ### CAT INTERACTIONS
-        # max_order = 2
-        # X_new = CatIntAdder(max_order).fit_transform(X, y)
-        # new_cols = list(set(X_new.columns) - set(X.columns))
-        # self.get_target_rep_type(X_new[new_cols], y)
-        # self.scores[f'cat_int{max_order}'] = {}
-        # self.scores[f'cat_int{max_order}']['target_rep'] = self.cv_func(
-        #     X, y, linear_model, 
-        #     custom_prep=
-        #     [
-        #         CatIntAdder(max_order),
-        #         TargetRepresenter(self.feature_target_rep, self.target_type)
-        #         ])
-        # self.scores[f'cat_int{max_order}']['lgb-catint'], feature_importances = self.get_lgb_performance(X, y, custom_prep=[CatIntAdder(max_order)], lgb_model_type='catint')
-
-        ### CAT-FREQUENCY DETECTION
-        # X_freq = FreqAdder().fit_transform(X, y)
-        # new_cols = list(set(X_freq.columns) - set(X.columns))
-        # self.get_target_rep_type(X_freq[new_cols], y)
-        # self.scores['cat_freq'] = {}
-        # self.scores['cat_freq']['target_rep'] = self.cv_func(
-        #     X, y, linear_model, 
-        #     custom_prep=
-        #     [
-        #         FreqAdder(),
-        #         TargetRepresenter(self.feature_target_rep, self.target_type)
-        #         ])
-        # self.scores['cat_freq']['lgb-catint'], feature_importances = self.get_lgb_performance(X, y, custom_prep=[FreqAdder()], lgb_model_type='catint')
-
+        """
+        Returns
+        -------
+        self : AllInOneEngineer
+            The fitted instance of AllInOneEngineer.
+        """
         return self
 
-
-    def interpolation_test(self, X, y, max_degree=3, assign_dtypes=True):
-        X_use = X.copy()
-        remaining_cols = X_use.columns.tolist()
-
-        for d in range(1, max_degree+1):
-            if d==1:
-                interpolation_method = 'linear'
-            elif d in range(2,100) and type(d) is int:
-                interpolation_method = f'poly{d}'
-            else:
-                raise ValueError(f"Unsupported degree: {d}")
-            
-        
-            ### Interpolation test
-            interpol_cols = []
-            for cnum, col in enumerate(X_use.columns):
-                if cnum==0:
-                    minus_done = 0
-                if len(remaining_cols)==0:
-                    break                
-                if col not in remaining_cols: 
-                    minus_done += 1
-                    continue                
-                if self.verbose:
-                    print(f"\r{interpolation_method} interpolation test: {cnum-minus_done+1}/{len(remaining_cols)} columns processed", end="", flush=True)
-                
-                x_use = X_use[col].copy()
-                self.scores[col][interpolation_method] = self.single_interpolation_test(x_use, y, interpolation_method=interpolation_method)
-                
-                self.significances[col][f"test_{interpolation_method}_superior"] = self.significance_test(
-                        self.scores[col][interpolation_method] - self.scores[col]["mean"]
-                    )
-
-                self.significances[col][f"test_{interpolation_method}_superior_dummy"] = self.significance_test(
-                        self.scores[col][interpolation_method] - self.scores[col]["dummy"]
-                    )
-
-                self.significances[col][f"test_mean_superior_to_{interpolation_method}"] = self.significance_test(
-                         self.scores[col]["mean"] - self.scores[col][interpolation_method]
-                    )
-
-            remaining_cols = [x for x in remaining_cols if x not in interpol_cols]
-
-        return remaining_cols
-    
-
-    def transform(self, X_input, mode = "overwrite", fillna_numeric=False):
+    def transform(self, X_input: pd.DataFrame):
+        """
+         Applies feature engineering transformations to the input DataFrame.
+         - base_transformers: sequentially modify the original features (e.g., encoding, replacements).
+         - transformers: add new features to the dataset (e.g., interaction features).
+        """
         if not isinstance(X_input, pd.DataFrame):
             X_input = pd.DataFrame(X_input)
         X = X_input.copy()
+        
+        # Drop columns identified as irrelevant
         X = X.drop(self.drop_cols, axis=1, errors='ignore')
 
+        # Apply base_transformers that modify the original features
         for transformer in self.base_transformers:
             X = transformer.transform(X)
 
-        X_new = X.copy()
+        # Apply transformers that add new features
+        new_feats = []
         for transformer in self.transformers:
             X_feat = transformer.transform(X)
+            # Only add new columns generated by the transformer
+            new_cols = [col for col in X_feat.columns if col not in X.columns]
+            new_feats.append(X_feat[new_cols])
 
-            new_cols = list(set(X_feat.columns) - set(X.columns))
-            X_new = pd.concat([X_new, X_feat[new_cols]], axis=1)
+        return pd.concat([X, *new_feats], axis=1)
 
-        return X_new
-    
-    # def transform_y(self, y_input):
-    #     y = y_input.copy()
-    #     if self.linear_residuals:
-    #         y_new = self.target_transformers[0].transform(y)
-
-    #     y_new = pd.Series(y_new, index=y.index, name=y.name)
-
-    #     return y_new
-
-
-if __name__ == "__main__":
-    import os
-    from tabprep.utils import *
-    import openml
-    benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
-    dataset_name = 'physio'
-    for benchmark in ['TabArena']: # ["Grinsztajn", "TabArena", "TabZilla"]:
-        exp_name = f"EXP_AllInOne-numint3{benchmark}"
-        if False: #os.path.exists(f"{exp_name}.pkl"):
-            with open(f"{exp_name}.pkl", "rb") as f:
-                results = pickle.load(f)
-        else:
-            results = {}
-            results['performance'] = {}
-            results['new_cols'] = {}
-            results['drop_cols'] = {}
-            results['significances'] = {}
-            results['dupe_map'] = {}
-
-        tids, dids = get_benchmark_dataIDs(benchmark)  
-
-        remaining_cols = {}
-
-        for tid, did in zip(tids, dids):
-            task = openml.tasks.get_task(tid)  # to check if the datasets are available
-            data = openml.datasets.get_dataset(did)  # to check if the datasets are available
-            if dataset_name not in data.name:
-                continue
-            
-            if data.name in results['performance']:
-                print(f"Skipping {data.name} as it already exists in results.")
-                print(pd.DataFrame(results['performance'][data.name]).mean().sort_values(ascending=False))
-                continue
-            # else:
-            #     break
-            print(data.name)
-            if data.name == 'guillermo':
-                continue
-            X, _, _, _ = data.get_data()
-            y = X[data.default_target_attribute]
-            X = X.drop(columns=[data.default_target_attribute])
-            
-            # X = X.sample(n=1000)
-            # y = y.loc[X.index]
-
-            if benchmark == "Grinsztajn" and X.shape[0]>10000:
-                X = X.sample(10000, random_state=0)
-                y = y.loc[X.index]
-
-            if task.task_type == "Supervised Classification":
-                target_type = "binary" if y.nunique() == 2 else "multiclass"
-            else:
-                target_type = 'regression'
-            
-            detector = AllInOneEngineer(        
-                target_type=target_type,
-                # engineering_techniques=['cat_as_num', 'cat_freq', 'cat_int', 'cat_groupby', 'num_int', 'groupby', 'linear_residuals'],
-                engineering_techniques=['quantile_reg'],
-                use_residuals=False,
-                                        )
-
-            detector.fit(X, y)
-            X_new = detector.transform(X)
-            print(f"Drop columns ({len(detector.drop_cols)}): {detector.drop_cols}")
-            print(f"New columns ({X_new.shape[1] - X.shape[1]}): {list(set(X_new.columns)-set(X.columns))}")
-            # print(pd.DataFrame(detector.significances))
-            # print(pd.DataFrame({col: pd.DataFrame(detector.scores[col]).mean().sort_values() for col in detector.scores}).transpose())
-            # print(detector.linear_features.keys())
-            results['performance'][data.name] = detector.scores
-            results['significances'][data.name] = detector.significances
-            results['new_cols'][data.name] = list(set(X_new.columns)-set(X.columns))
-            results['drop_cols'][data.name] = detector.drop_cols
-            results['dupe_map'][data.name] = len(detector.dupe_map)
-        with open(f"{exp_name}.pkl", "wb") as f:
-            pickle.dump(results, f)
-        break
+    def fit_transform(self, X: pd.DataFrame, y: pd.Series = None):
+        """
+        Fits the AllInOneEngineer to the data and then transforms it.
+        """
+        self.fit(X, y)
+        return self.transform(X)    
