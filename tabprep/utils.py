@@ -539,7 +539,7 @@ def local_and_distant_means(x: pd.Series, y: pd.Series, k=5,
 
 
     for i, idx in enumerate(indices):
-        np.random.seed(i)
+        rng = np.random.default_rng(i)
         distances = np.abs(indices - idx)
         sorted_idx = np.argsort(distances)
         
@@ -555,7 +555,7 @@ def local_and_distant_means(x: pd.Series, y: pd.Series, k=5,
                 farthest_indices = indices[sorted_idx[-(k+1)]]
         if method=="random":        
             closest_indices = indices[sorted_idx[:k]][-max_k:]
-            farthest_indices = np.random.choice(indices[sorted_idx[k:]], k)[-max_k:]  
+            farthest_indices = rng.choice(indices[sorted_idx[k:]], k)[-max_k:]  
 
         local_mean = np.abs(y_agg.loc[closest_indices]-y_agg.iloc[i]).mean()
         distant_mean = np.abs(y_agg.loc[farthest_indices]-y_agg.iloc[i]).mean()
@@ -1527,8 +1527,27 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                 else:
                     y_tr_for_weights = y_s.iloc[train_idx]
                 w_tr = _density_weights(y_tr_for_weights)                
+                w_te = None
+            elif sample_weights == 'cls_balanced':
+                val_map = y_tr.value_counts(normalize=True).to_dict()
+                w_tr = 1-y_tr.map(val_map)
+                w_te = 1-y_te.map(val_map)
+            elif sample_weights == 'duplicates':
+                train_str = X_tr.astype(str).sum(axis=1)
+                cnt_map = dict(train_str.value_counts())
+                
+                X_tr = X_tr.drop_duplicates()
+                w_tr = X_tr.astype(str).sum(axis=1).map(cnt_map).values
+                if target_type == "regression":
+                    y_tr_map = y_tr.groupby(train_str).mean().astype(float)
+                elif target_type == "binary":
+                    y_tr_map = y_tr.groupby(train_str).mean().round()
+                # y_tr_use = y_tr.loc[X_tr.index]
+                y_tr = X_tr.astype(str).sum(axis=1).map(y_tr_map)
+                w_te = None
             elif sample_weights is None:
                 w_tr = None
+                w_te = None
             else:
                 raise ValueError("sample_weights must be None or 'density'")
 
@@ -1538,11 +1557,11 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                     # if scale_y is linear_residuals, we need to pass the residuals
                     pipeline.fit(
                         X_tr, y_tr - y_tr_lin,
-                        **fit_params,
                         **{
                             "model__eval_set": [(X_te, y_te - y_te_lin)],
                             "model__callbacks": [lgb.early_stopping(early_stopping_rounds, verbose=verbose)],
                             "model__sample_weight": w_tr,
+                            "model__eval_sample_weight": [w_te],
                             # "model__verbose": False
                         }
                     )
@@ -1553,6 +1572,7 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                             "model__eval_set": [(X_te, y_te)],
                             "model__callbacks": [lgb.early_stopping(early_stopping_rounds, verbose=verbose)],
                             "model__sample_weight": w_tr,
+                            "model__eval_sample_weight": [w_te],
                             # "model__verbose": False
                         }
                     )
@@ -1626,25 +1646,15 @@ def make_cv_function(target_type, n_folds=5, early_stopping_rounds=20,
                     )
 
         # TODO: Might change to return a dict instead
-        if return_iterations and return_preds and return_importances:
-            return np.array(scores), iterations, all_preds, feature_importances
-        elif return_iterations and not return_preds and return_importances:
-            return np.array(scores), iterations, feature_importances
-        elif return_iterations and return_preds and not return_importances:
-            return np.array(scores), iterations, all_preds
-        elif return_iterations and not return_preds and not return_importances:
-            return np.array(scores), iterations
-        
-        if not return_iterations and return_preds and return_importances:
-            return np.array(scores), all_preds, feature_importances
-        elif not return_iterations and not return_preds and return_importances:
-            return np.array(scores), feature_importances
-        elif not return_iterations and return_preds and not return_importances:
-            return np.array(scores), all_preds
-        elif not return_iterations and not return_preds and not return_importances:
-            return np.array(scores)
-        else:
-            return np.array(scores)
+        return_dict = {'scores': np.array(scores)}
+        if return_iterations:
+            return_dict['iterations'] = iterations
+        if return_preds:
+            return_dict['preds'] = all_preds
+        if return_importances:
+            return_dict['importances'] = feature_importances
+
+        return return_dict
 
     return cv_func
 
@@ -1664,8 +1674,8 @@ def drop_mode_values(series, thresh=1):
     mode_values = value_counts.index[thresh:]
     return series[series.isin(mode_values)]
     
-def safe_stratified_group_kfold(X, y, groups, n_splits=5, max_attempts=1):
-    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+def safe_stratified_group_kfold(X, y, groups, n_splits=5, max_attempts=1, random_state=42):
+    sgkf = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     attempt = 0
 
     while attempt < max_attempts:
@@ -1682,11 +1692,11 @@ def safe_stratified_group_kfold(X, y, groups, n_splits=5, max_attempts=1):
     print("Could not generate stratified group folds with both classes in all test sets.")
     return None  # If we reach here, it means we couldn't find a valid split
 
-def grouped_interpolation_test(x,y, target_type, add_dummy=False):
+def grouped_interpolation_test(x,y, target_type, add_dummy=False, random_state=42):
     q = int(x.nunique())
     
     if target_type == 'binary':
-        # cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+        # cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=random_state)
         cv = safe_stratified_group_kfold(x, y, x, n_splits=5)
         if cv is None:
             return None
@@ -1695,15 +1705,15 @@ def grouped_interpolation_test(x,y, target_type, add_dummy=False):
             verbose=False, groups=x
             )
 
-        lgb_model = LGBMClassifier(verbose=-1, n_estimators=q, random_state=42, max_bin=q, max_depth=2)
+        lgb_model = LGBMClassifier(verbose=-1, n_estimators=q, random_state=random_state, max_bin=q, max_depth=2)
     elif target_type == 'regression':
-        cv = GroupKFold(n_splits=5, shuffle=True, random_state=42)
+        cv = GroupKFold(n_splits=5, shuffle=True, random_state=random_state)
         cv_scores_with_early_stopping = make_cv_scores_with_early_stopping(
             "regression", early_stopping_rounds=20, 
             verbose=False, groups=x
             )
 
-        lgb_model = LGBMRegressor(verbose=-1, n_estimators=q, random_state=42, max_bin=q, max_depth=2)
+        lgb_model = LGBMRegressor(verbose=-1, n_estimators=q, random_state=random_state, max_bin=q, max_depth=2)
 
 
     if add_dummy:
