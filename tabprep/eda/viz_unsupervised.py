@@ -66,6 +66,17 @@ def plot_categorical_counts(df, columns=None):
         plt.xticks(rotation=45)
         plt.show()
 
+def analyze_cat_feature(x,y):
+    # NOTE: histograms look different depending on whether we treat a feature as string or float - could somehow use this information
+    fig,ax = plt.subplots(1,4, figsize=(10, 5))
+    ax[0].scatter(x, y)
+
+    y_by_x = y.groupby(x, observed=False).mean()
+    ax[1].scatter(y_by_x.index, y_by_x.values)
+
+    ax[2].hist(x, bins=100)
+    pd.Series(x.astype(float).sort_values()).plot(kind='hist', bins=100, ax=ax[3])
+
 
 def plot_pairwise_relationships(df, columns=None, hue=None):
     """
