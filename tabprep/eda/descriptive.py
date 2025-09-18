@@ -4,8 +4,39 @@ import numpy as np
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, Iterable, Optional
+from scipy.stats import chi2_contingency
+from itertools import combinations
 
+def cramers_v_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute a Cramér's V matrix for all categorical columns in the DataFrame.
+    Optimized for performance.
+    """
+    cat_cols = df.select_dtypes(include=['object', 'category']).columns
+    n = len(cat_cols)
+    result = pd.DataFrame(np.eye(n), index=cat_cols, columns=cat_cols)  # identity matrix
 
+    for col1, col2 in combinations(cat_cols, 2):
+        table = pd.crosstab(df[col1], df[col2])
+        chi2, _, _, _ = chi2_contingency(table, correction=False)
+        n_obs = table.sum().sum()
+        phi2 = chi2 / n_obs
+        r, k = table.shape
+
+        # Bias correction
+        phi2corr = max(0, phi2 - ((k-1)*(r-1)) / (n_obs - 1))
+        rcorr = r - ((r-1)**2) / (n_obs - 1)
+        kcorr = k - ((k-1)**2) / (n_obs - 1)
+        denom = min((kcorr - 1), (rcorr - 1))
+        if denom == 0:
+            v = np.nan
+        else:
+            v = np.sqrt(phi2corr / denom)
+
+        result.loc[col1, col2] = v
+        result.loc[col2, col1] = v  # fill symmetric cell
+
+    return result
 
 class DatasetSummary:
     # TODO: Add regression distribution type statistics (e.g. skew, kurtosis, multimodality)

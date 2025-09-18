@@ -5,10 +5,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import os
-
+import random
 from typing import Literal, Any, Dict
 
-from tabprep.utils.modeling_utils import p_value_wilcoxon_greater_than_zero
+from tabprep.utils.eval_utils import p_value_wilcoxon_greater_than_zero
 
 def is_misclassified_numeric(series: pd.Series, threshold: float = 0.9) -> bool:
     # TODO: Seems to be unused, consider removing.
@@ -440,3 +440,33 @@ def sample_from_set(
         raise ValueError("Number of samples requested exceeds the size of the set")
     my_list = list(my_set)
     return random.sample(my_list, num_samples)
+
+def drop_highly_correlated_features(
+        corr_matrix: pd.DataFrame, 
+        threshold: float = 0.95
+        ) -> pd.DataFrame:
+    """
+    Drops columns from the correlation matrix that are highly correlated (above threshold) with any other column,
+    starting from the last column and moving backwards.
+
+    Parameters:
+    - corr_matrix (pd.DataFrame): The correlation matrix.
+    - threshold (float): Correlation threshold above which columns will be dropped.
+
+    Returns:
+    - pd.DataFrame: Reduced correlation matrix with highly correlated columns dropped.
+    """
+    columns = corr_matrix.columns.tolist()
+
+    i = len(columns) - 1
+    while i >= 0:
+        col = columns[i]
+        # Check if this column is highly correlated with any of the others
+        high_corr = corr_matrix[col].drop(labels=[col]).abs() > threshold
+        if high_corr.any():
+            # Drop the column
+            corr_matrix = corr_matrix.drop(columns=col).drop(index=col)
+            columns.pop(i)
+        i -= 1
+
+    return corr_matrix
