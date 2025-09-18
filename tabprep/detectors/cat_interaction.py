@@ -1,14 +1,14 @@
 import numpy as np
 import pandas as pd
 from sklearn.pipeline import Pipeline
-from tabprep.utils import sample_from_set
+from tabprep.utils.misc import sample_from_set
 from itertools import combinations 
-from tabprep.utils import make_cv_function, p_value_wilcoxon_greater_than_zero
+from tabprep.utils.eval_utils import p_value_wilcoxon_greater_than_zero
 from tabprep.proxy_models import TargetMeanRegressor, TargetMeanClassifier
 from itertools import product, combinations
 from category_encoders import LeaveOneOutEncoder
 from sklearn.metrics import roc_auc_score, root_mean_squared_error
-from tabprep.base_preprocessor import BasePreprocessor
+from tabprep.detectors.base_preprocessor import BasePreprocessor
 from sklearn.dummy import DummyClassifier, DummyRegressor
 
 class CategoricalInteractionDetector(BasePreprocessor):
@@ -156,7 +156,7 @@ class CategoricalInteractionDetector(BasePreprocessor):
                 if col not in self.scores:
                     self.scores[col] = {}
                 if 'mean' not in self.scores[col]:
-                    self.scores[col]['mean'] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
+                    self.scores[col]['mean'] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))['scores']
 
                 for base_col in base_cols:
                     self.significances[col][base_col] = p_value_wilcoxon_greater_than_zero(
@@ -187,7 +187,7 @@ class CategoricalInteractionDetector(BasePreprocessor):
                 if col not in self.scores:
                     self.scores[col] = {}
                 if 'mean' not in self.scores[col]:
-                    self.scores[col] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
+                    self.scores[col] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))['scores']
 
                 for base_col in base_cols:
                     self.significances[col][base_col] = p_value_wilcoxon_greater_than_zero(
@@ -228,7 +228,7 @@ class CategoricalInteractionDetector(BasePreprocessor):
                 if col not in self.scores:
                     self.scores[col] = {}
                 if 'mean' not in self.scores[col]:
-                    self.scores[col]['mean'] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
+                    self.scores[col]['mean'] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))['scores']
 
                 base_cols = col.split('_&_')
                 
@@ -241,7 +241,7 @@ class CategoricalInteractionDetector(BasePreprocessor):
                         self.scores[base_col] = {}
                     if 'mean' not in self.scores[base_col]:
                         raw_cols = base_col.split('_&_')
-                        self.scores[base_col]['mean'] = self.cv_func(self.combine(X[raw_cols], order=len(raw_cols)), y, Pipeline([('model', self.target_model)]))
+                        self.scores[base_col]['mean'] = self.cv_func(self.combine(X[raw_cols], order=len(raw_cols)), y, Pipeline([('model', self.target_model)]))['scores']
 
                     self.significances[col][base_col] = p_value_wilcoxon_greater_than_zero(
                         self.scores[col]['mean'] - self.scores[base_col]['mean']
@@ -302,7 +302,7 @@ class CategoricalInteractionDetector(BasePreprocessor):
             if col not in self.scores:
                 self.scores[col] = {}
             if 'mean' not in self.scores[col]:
-                self.scores[col]['mean'] = self.cv_func(X[[col]], y, Pipeline([('model', self.target_model)]))
+                self.scores[col]['mean'] = self.cv_func(X[[col]], y, Pipeline([('model', self.target_model)]))['scores']
 
         if self.execution_mode == "expand":
             X_new = self.find_interactions_expand(X, y)

@@ -2,11 +2,11 @@ from narwhals import col
 import numpy as np
 import pandas as pd
 from itertools import combinations 
-from tabprep.utils import make_cv_function
+from tabprep.utils.modeling_utils import make_cv_function
 from tabprep.proxy_models import TargetMeanRegressor, TargetMeanClassifier
 from itertools import combinations, product
 import re
-from tabprep.preprocessors import drop_highly_correlated_features
+from tabprep.utils.misc import drop_highly_correlated_features
 
 '''
 Next steps:
@@ -15,7 +15,7 @@ Next steps:
 - Add interaction test to BasePreprocessor
 '''
 
-from tabprep.base_preprocessor import BasePreprocessor
+from tabprep.detectors.base_preprocessor import BasePreprocessor
 class NumericalInteractionDetector(BasePreprocessor):
     def __init__(self, 
                  target_type, 
@@ -49,6 +49,7 @@ class NumericalInteractionDetector(BasePreprocessor):
         self.max_base_interactions = max_base_interactions
         self.apply_filters = apply_filters
         self.candidate_cols = candidate_cols
+        self.__name__ = "NumericalInteractionDetector"
 
         
         if self.target_type=='regression':
@@ -285,9 +286,9 @@ class NumericalInteractionDetector(BasePreprocessor):
                 # Combine interaction performance
                 # x = X_full[col].astype(str) + X_full[col2].astype(str)
                 # if self.target_type == "regression":
-                #     self.scores[arithmetic_col]['combine'] = self.cv_func(x.to_frame(), y, Pipeline(steps=[('model', TargetMeanRegressor())]))
+                #     self.scores[arithmetic_col]['combine'] = self.cv_func(x.to_frame(), y, Pipeline(steps=[('model', TargetMeanRegressor())]))['scores']
                 # else:
-                #     self.scores[arithmetic_col]['combine'] = self.cv_func(x.to_frame(), y, Pipeline(steps=[('model', TargetMeanClassifier())]))
+                #     self.scores[arithmetic_col]['combine'] = self.cv_func(x.to_frame(), y, Pipeline(steps=[('model', TargetMeanClassifier())]))['scores']
                 
 
         remaining_cols = [x for x in X_cand.columns if x not in interaction_cols]
@@ -424,7 +425,7 @@ class NumericalInteractionDetector(BasePreprocessor):
             X_num = X_num[self.candidate_cols]
 
         # Shrink numerical features to the necessary ones
-        X_num = X_num.loc[:, X_num.nunique() > self.min_cardinality]
+        X_num = X_num.loc[:, X_num.nunique() >= self.min_cardinality]
         X_num = self.remove_mostlynan_features(X_num)
         # X_num = self.remove_constant_features(X_num)
         
@@ -547,80 +548,3 @@ class NumericalInteractionDetector(BasePreprocessor):
         X_out = pd.concat([X_out] + new_cols, axis=1)
 
         return X_out
-
-if __name__ == "__main__":
-    from ft_detection import clean_feature_names
-    import os
-    from tabprep.utils import *
-    import openml
-    from ft_detection import clean_feature_names
-    benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
-    dataset_name = 'coil'
-    for benchmark in ['TabArena']: # ["Grinsztajn", "TabArena", "TabZilla"]:
-        exp_name = f"EXP_num_interaction_{benchmark}"
-        if os.path.exists(f"{exp_name}.pkl"):
-            with open(f"{exp_name}.pkl", "rb") as f:
-                results = pickle.load(f)
-        else:
-            results = {}
-            results['performance'] = {}
-            results['iterations'] = {}
-            results['significances'] = {}
-
-        tids, dids = get_benchmark_dataIDs(benchmark)  
-
-        remaining_cols = {}
-
-        for tid, did in zip(tids, dids):
-            task = openml.tasks.get_task(tid)  # to check if the datasets are available
-            data = openml.datasets.get_dataset(did)  # to check if the datasets are available
-            if dataset_name not in data.name:
-                continue
-        
-            
-            if data.name in results['performance']:
-                print(f"Skipping {data.name} as it already exists in results.")
-                print(pd.DataFrame(results['performance'][data.name]).mean().sort_values(ascending=False))
-                continue
-            # else:
-            #     break
-            print(data.name)
-            if data.name == 'guillermo':
-                continue
-            X, _, _, _ = data.get_data()
-            y = X[data.default_target_attribute]
-            X = X.drop(columns=[data.default_target_attribute])
-            
-            # X = X.sample(n=1000)
-            # y = y.loc[X.index]
-
-            if benchmark == "Grinsztajn" and X.shape[0]>10000:
-                X = X.sample(10000, random_state=0)
-                y = y.loc[X.index]
-
-            if task.task_type == "Supervised Classification":
-                target_type = "binary" if y.nunique() == 2 else "multiclass"
-            else:
-                target_type = 'regression'
-            if target_type=="multiclass":
-                # TODO: Fix this hack
-                y = (y==y.value_counts().index[0]).astype(int)  # make it binary
-                target_type = "binary"
-            elif target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
-                y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
-            else:
-                y = y.astype(float)
-            
-            detector = NumericalInteractionDetector(
-                target_type=target_type, 
-                max_order=2, num_operations='all',
-                use_mvp=False,
-                select_n_candidates=1000,
-            )
-
-            detector.fit(X, y)
-            detector.transform(X)
-            print(f"Found {len(detector.new_cols)} new interaction columns for {data.name}.")
-
-            break
-        break

@@ -1,14 +1,15 @@
 import numpy as np
 import pandas as pd
 from sklearn.pipeline import Pipeline
-from tabprep.utils import sample_from_set
+from tabprep.utils.misc import sample_from_set
 from itertools import combinations 
-from tabprep.utils import make_cv_function, p_value_wilcoxon_greater_than_zero
+from tabprep.utils.modeling_utils import make_cv_function
+from tabprep.utils.eval_utils import p_value_wilcoxon_greater_than_zero
 from tabprep.proxy_models import TargetMeanRegressor, TargetMeanClassifier, LightGBMBinner
 from itertools import product, combinations
 from category_encoders import LeaveOneOutEncoder
 from sklearn.metrics import roc_auc_score, root_mean_squared_error
-from tabprep.base_preprocessor import BasePreprocessor
+from tabprep.detectors.base_preprocessor import BasePreprocessor
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.preprocessing import OrdinalEncoder
 
@@ -274,7 +275,7 @@ class GroupByFeatureEngineer(BasePreprocessor):
                 if col not in self.scores:
                     self.scores[col] = {}
                 if 'mean' not in self.scores[col]:
-                    self.scores[col]['mean'] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
+                    self.scores[col]['mean'] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))['scores']
 
                 for base_col in base_cols:
                     self.significances[col][base_col] = p_value_wilcoxon_greater_than_zero(
@@ -305,7 +306,7 @@ class GroupByFeatureEngineer(BasePreprocessor):
                 if col not in self.scores:
                     self.scores[col] = {}
                 if 'mean' not in self.scores[col]:
-                    self.scores[col] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
+                    self.scores[col] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))['scores']
 
                 for base_col in base_cols:
                     self.significances[col][base_col] = p_value_wilcoxon_greater_than_zero(
@@ -346,7 +347,7 @@ class GroupByFeatureEngineer(BasePreprocessor):
                 if col not in self.scores:
                     self.scores[col] = {}
                 if 'mean' not in self.scores[col]:
-                    self.scores[col]['mean'] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))
+                    self.scores[col]['mean'] = self.cv_func(X_interact[[col]], y, Pipeline([('model', self.target_model)]))['scores']
 
                 base_cols = col.split('_&_')
                 
@@ -359,7 +360,7 @@ class GroupByFeatureEngineer(BasePreprocessor):
                         self.scores[base_col] = {}
                     if 'mean' not in self.scores[base_col]:
                         raw_cols = base_col.split('_&_')
-                        self.scores[base_col]['mean'] = self.cv_func(self.combine(X[raw_cols], order=len(raw_cols)), y, Pipeline([('model', self.target_model)]))
+                        self.scores[base_col]['mean'] = self.cv_func(self.combine(X[raw_cols], order=len(raw_cols)), y, Pipeline([('model', self.target_model)]))['scores']
 
                     self.significances[col][base_col] = p_value_wilcoxon_greater_than_zero(
                         self.scores[col]['mean'] - self.scores[base_col]['mean']
@@ -505,7 +506,7 @@ class GroupByFeatureEngineer(BasePreprocessor):
         #     if col not in self.scores:
         #         self.scores[col] = {}
         #     if 'mean' not in self.scores[col]:
-        #         self.scores[col]['mean'] = self.cv_func(X[[col]], y, Pipeline([('model', self.target_model)]))
+        #         self.scores[col]['mean'] = self.cv_func(X[[col]], y, Pipeline([('model', self.target_model)]))['scores']
 
         # if self.execution_mode == "expand":
         #     X_new = self.find_interactions_expand(X, y)
@@ -546,87 +547,4 @@ class GroupByFeatureEngineer(BasePreprocessor):
             X_out = pd.concat([X_out, X_new], axis=1)
 
         return X_out
-
-
-if __name__ == "__main__":
-    import os
-    from tabprep.utils import *
-    import openml
-    benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
-    dataset_name = 'kdd'
-    for benchmark in ['TabArena']: # ["Grinsztajn", "TabArena", "TabZilla"]:
-        exp_name = f"EXP_groupby{benchmark}"
-        if False: #os.path.exists(f"{exp_name}.pkl"):
-            with open(f"{exp_name}.pkl", "rb") as f:
-                results = pickle.load(f)
-        else:
-            results = {}
-            results['performance'] = {}
-            results['new_cols'] = {}
-            results['significances'] = {}
-
-        tids, dids = get_benchmark_dataIDs(benchmark)  
-
-        remaining_cols = {}
-
-        for tid, did in zip(tids, dids):
-            task = openml.tasks.get_task(tid)  # to check if the datasets are available
-            data = openml.datasets.get_dataset(did)  # to check if the datasets are available
-            if dataset_name in data.name:
-                continue
-        
-            
-            if data.name in results['performance']:
-                print(f"Skipping {data.name} as it already exists in results.")
-                print(pd.DataFrame(results['performance'][data.name]).mean().sort_values(ascending=False))
-                continue
-            # else:
-            #     break
-            print(data.name)
-            if data.name == 'guillermo':
-                continue
-            X, _, _, _ = data.get_data()
-            y = X[data.default_target_attribute]
-            X = X.drop(columns=[data.default_target_attribute])
-            
-            # X = X.sample(n=1000)
-            # y = y.loc[X.index]
-
-            if benchmark == "Grinsztajn" and X.shape[0]>10000:
-                X = X.sample(10000, random_state=0)
-                y = y.loc[X.index]
-
-            if task.task_type == "Supervised Classification":
-                target_type = "binary" if y.nunique() == 2 else "multiclass"
-            else:
-                target_type = 'regression'
-            if target_type=="multiclass":
-                # TODO: Fix this hack
-                y = (y==y.value_counts().index[0]).astype(int)  # make it binary
-                target_type = "binary"
-            elif target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
-                y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
-            else:
-                y = y.astype(float)
-
-            detector = GroupByFeatureEngineer(
-                target_type=target_type,
-                execution_mode='all',
-                use_mvp=True,
-            )
-
-            detector.fit(X, y)
-            X_new = detector.transform(X)
-            print(f"New columns ({X_new.shape[1] - X.shape[1]}): {list(set(X_new.columns)-set(X.columns))}")
-            # print(pd.DataFrame(detector.significances))
-            print(pd.DataFrame({col: pd.DataFrame(detector.scores[col]).mean().sort_values() for col in detector.scores}).transpose())
-            # print(detector.linear_features.keys())
-            results['performance'][data.name] = detector.scores
-            results['significances'][data.name] = detector.significances
-            results['new_cols'][data.name] = list(set(X_new.columns)-set(X.columns))
-            
-        with open(f"{exp_name}.pkl", "wb") as f:
-            pickle.dump(results, f)
-        break
-
 

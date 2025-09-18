@@ -6,11 +6,14 @@ from sklearn.impute import SimpleImputer
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import roc_auc_score, r2_score, root_mean_squared_error, log_loss
+
 from tabprep.proxy_models import TargetMeanClassifier, TargetMeanRegressor, UnivariateLinearRegressor, UnivariateLogisticClassifier, PolynomialLogisticClassifier, PolynomialRegressor, UnivariateThresholdClassifier, MultiFeatureTargetMeanClassifier, MultiFeatureUnivariateLogisticClassifier, LightGBMBinner, KMeansBinner
-from tabprep.utils import p_value_wilcoxon_greater_than_zero, clean_feature_names, clean_series, make_cv_function, p_value_sign_test_median_greater_than_zero, p_value_ttest_greater_than_zero
+from tabprep.utils.eval_utils import p_value_wilcoxon_greater_than_zero, p_value_sign_test_median_greater_than_zero, p_value_ttest_greater_than_zero
+from tabprep.utils.modeling_utils import clean_feature_names, clean_series, make_cv_function
+from tabprep.detectors.base_preprocessor import BasePreprocessor
+
 import time
 from category_encoders import LeaveOneOutEncoder
-from tabprep.base_preprocessor import BasePreprocessor
 
 class FeatureTypeDetector(BasePreprocessor):
     def __init__(self, target_type, 
@@ -329,7 +332,7 @@ class FeatureTypeDetector(BasePreprocessor):
 
             model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
             pipe = Pipeline([("model", model)])
-            self.scores[col]["lgb"] = self.cv_func(clean_feature_names(x_use), y, pipe)
+            self.scores[col]["lgb"] = self.cv_func(clean_feature_names(x_use), y, pipe)['scores']
 
             self.significances[col]["test_lgb_superior"] = self.significance_test(
                 self.scores[col]["lgb"] - self.scores[col]["mean"]
@@ -351,7 +354,7 @@ class FeatureTypeDetector(BasePreprocessor):
             if self.fit_cat_models:
                 model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
                 pipe = Pipeline([("model", model)])
-                self.scores[col]["lgb-cat"] = self.cv_func(clean_feature_names(x_use).astype("category"), y, pipe)
+                self.scores[col]["lgb-cat"] = self.cv_func(clean_feature_names(x_use).astype("category"), y, pipe)['scores']
 
                 self.significances[col]["test_lgb-ascat_superior"] = self.significance_test(
                     self.scores[col]["lgb-cat"] - self.scores[col]["lgb"]
@@ -656,7 +659,7 @@ class FeatureTypeDetector(BasePreprocessor):
                 mode_map = dict(zip(modes.index[:num_modes], range(num_modes)))
                 x_use = x.map(mode_map).fillna(num_modes)
                 # roc_auc_score(y, TargetMeanClassifier().fit(X[[x.name]]==0, y).predict_proba(X[[x.name]]==0)[:,1])
-                self.scores[col][f'mode{num_modes}'] = self.cv_func(x_use.to_frame(), y, Pipeline([('model',  target_model)]))
+                self.scores[col][f'mode{num_modes}'] = self.cv_func(x_use.to_frame(), y, Pipeline([('model',  target_model)]))['scores']
 
                 self.significances[col][f"{num_modes}_superior_mean"] = self.significance_test(
                     self.scores[col][f'mode{num_modes}'] - self.scores[col]['mean']

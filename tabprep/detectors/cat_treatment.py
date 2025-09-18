@@ -8,7 +8,7 @@ from sympy import Ordinal, rem
 from tabprep.proxy_models import TargetMeanClassifier, TargetMeanRegressor, TargetMeanClassifierCut, TargetMeanRegressorCut, UnivariateLinearRegressor, UnivariateLogisticClassifier
 import openml
 import pandas as pd
-from tabprep.utils import get_benchmark_dataIDs, get_metadata_df, make_cv_function
+from tabprep.utils.modeling_utils import get_benchmark_dataIDs, get_metadata_df, make_cv_function
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, root_mean_squared_error, log_loss
@@ -16,7 +16,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.base import TransformerMixin
 from category_encoders import LeaveOneOutEncoder, OneHotEncoder, TargetEncoder
 from sklearn.dummy import DummyClassifier, DummyRegressor
-from tabprep.base_preprocessor import BasePreprocessor
+from tabprep.detectors.base_preprocessor import BasePreprocessor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
 class CatTreatmentDetector(BasePreprocessor):

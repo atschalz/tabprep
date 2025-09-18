@@ -7,9 +7,7 @@ from sympy import rem
 from tabprep.proxy_models import TargetMeanClassifier, TargetMeanRegressor, TargetMeanClassifierCut, TargetMeanRegressorCut
 import openml
 import pandas as pd
-from tabprep.utils import get_benchmark_dataIDs, get_metadata_df, make_cv_function
-
-
+from tabprep.utils.modeling_utils import get_benchmark_dataIDs
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, root_mean_squared_error, log_loss
@@ -17,7 +15,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.base import TransformerMixin
 from category_encoders import LeaveOneOutEncoder
 from sklearn.dummy import DummyClassifier, DummyRegressor
-from tabprep.base_preprocessor import BasePreprocessor
+from tabprep.detectors.base_preprocessor import BasePreprocessor
 
 
 class CatFreqDetector(BasePreprocessor):
@@ -121,81 +119,3 @@ class CatFreqDetector(BasePreprocessor):
             X_out[col+"_freq"] = self.get_freq_feature(X_out[col])
 
         return X_out
-
-if __name__ == "__main__":
-    import os
-    from tabprep.utils import *
-    import openml
-    
-    benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
-    dataset_name = 'wine'
-    for benchmark in ['TabArena', "Grinsztajn", "TabZilla"]:
-        exp_name = f"EXP_cat_freq_{benchmark}"
-        if os.path.exists(f"{exp_name}.pkl"):
-            with open(f"{exp_name}.pkl", "rb") as f:
-                results = pickle.load(f)
-        else:
-            results = {}
-            results['performance'] = {}
-            results['iterations'] = {}
-            results['significances'] = {}
-
-        tids, dids = get_benchmark_dataIDs(benchmark)  
-
-        remaining_cols = {}
-
-        for tid, did in zip(tids, dids):
-            task = openml.tasks.get_task(tid)  # to check if the datasets are available
-            data = openml.datasets.get_dataset(did)  # to check if the datasets are available
-            # if dataset_name not in data.name:
-            #     continue
-        
-            
-            if data.name in results['performance']:
-                print(f"Skipping {data.name} as it already exists in results.")
-                print(pd.DataFrame(results['performance'][data.name]).apply(lambda x: np.mean(np.mean(x)),axis=1))
-                continue
-            # else:
-            #     break
-            print(data.name)
-            if data.name == 'guillermo':
-                continue
-            X, _, _, _ = data.get_data()
-            y = X[data.default_target_attribute]
-            X = X.drop(columns=[data.default_target_attribute])
-            
-            # X = X.sample(n=1000)
-            # y = y.loc[X.index]
-
-            if benchmark == "Grinsztajn" and X.shape[0]>10000:
-                X = X.sample(10000, random_state=0)
-                y = y.loc[X.index]
-
-            if task.task_type == "Supervised Classification":
-                target_type = "binary" if y.nunique() == 2 else "multiclass"
-            else:
-                target_type = 'regression'
-            if target_type=="multiclass":
-                # TODO: Fix this hack
-                y = (y==y.value_counts().index[0]).astype(int)  # make it binary
-                target_type = "binary"
-            elif target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
-                y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
-            else:
-                y = y.astype(float)
-            
-            detector = CatFreqDetector(
-                target_type=target_type, 
-            )
-
-            detector.fit(X, y)
-            if detector.detection_attempted:
-                results['performance'][data.name] = detector.scores
-                results['significances'][data.name] = detector.significances
-                
-                print(pd.DataFrame(results['performance'][data.name]).apply(lambda x: np.mean(np.mean(x)),axis=1).sort_values())
-                print()
-        with open(f"{exp_name}.pkl", "wb") as f:
-            pickle.dump(results, f)
-
-    

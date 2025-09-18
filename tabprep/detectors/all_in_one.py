@@ -3,17 +3,18 @@ import numpy as np
 import lightgbm as lgb
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import roc_auc_score, root_mean_squared_error, log_loss
-from tabprep.proxy_models import  CustomLinearModel
-from tabprep.utils import clean_feature_names, make_cv_function
-from category_encoders import LeaveOneOutEncoder
-from tabprep.base_preprocessor import BasePreprocessor
 
-from tabprep.preprocessors import TargetRepresenter, FreqAdder, CatIntAdder, CatGroupByAdder, SVDConcatTransformer, CatAsNumTransformer, CatOHETransformer, CatLOOTransformer, DuplicateCountAdder, DuplicateContentLOOEncoder, LinearFeatureAdder, OOFLinearFeatureAdder
-from tabprep.num_interaction import NumericalInteractionDetector
-from tabprep.groupby_interactions import GroupByFeatureEngineer
+from tabprep.proxy_models import  CustomLinearModel
+from tabprep.utils.modeling_utils import make_cv_function, clean_feature_names
+from tabprep.detectors.base_preprocessor import BasePreprocessor
+from tabprep.old_preprocessors import TargetRepresenter, FreqAdder, CatIntAdder, CatGroupByAdder, SVDConcatTransformer, CatAsNumTransformer, CatOHETransformer, CatLOOTransformer, DuplicateCountAdder, DuplicateContentLOOEncoder, LinearFeatureAdder, OOFLinearFeatureAdder
+from tabprep.detectors.num_interaction import NumericalInteractionDetector
+from tabprep.detectors.groupby_interactions import GroupByFeatureEngineer
+
+from category_encoders import LeaveOneOutEncoder
 from autogluon.features.generators.drop_duplicates import DropDuplicatesFeatureGenerator
 
-from tabprep.modeling_utils import adapt_lgb_params, adjust_target_format
+from tabprep.utils.modeling_utils import adapt_lgb_params, adjust_target_format
 
 from typing import Union, Optional, List, Callable, Literal, Dict, Any
 

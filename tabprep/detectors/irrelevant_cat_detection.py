@@ -7,8 +7,8 @@ from sympy import rem
 from tabprep.proxy_models import TargetMeanClassifier, TargetMeanRegressor, TargetMeanClassifierCut, TargetMeanRegressorCut
 import openml
 import pandas as pd
-from tabprep.utils import get_benchmark_dataIDs, get_metadata_df, make_cv_function
-from tabprep.ft_detection import FeatureTypeDetector
+from tabprep.utils.modeling_utils import get_benchmark_dataIDs, get_metadata_df, make_cv_function
+from tabprep.detectors.ft_detection import FeatureTypeDetector
 
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import StratifiedKFold
@@ -17,7 +17,9 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.base import TransformerMixin
 from category_encoders import LeaveOneOutEncoder
 from sklearn.dummy import DummyClassifier, DummyRegressor
-from tabprep.base_preprocessor import BasePreprocessor
+from tabprep.detectors.base_preprocessor import BasePreprocessor
+
+import lightgbm as lgb
 
 def make_cv_stratified_on_x(target_type, n_folds=5, verbose=False, early_stopping_rounds=20, vectorized=False):
     """CV creation function for vectorized versions of the TargetEncoderModels."""
@@ -61,7 +63,7 @@ def make_cv_stratified_on_x(target_type, n_folds=5, verbose=False, early_stoppin
                 preds = pipeline.predict(X_te)
 
             if vectorized:
-                scores.append({col: scorer(y_te, preds[:,num]) for num, col in enumerate(X_df.columns)})
+                scores.append({col: scorer(y_te, preds[:,num]) for num, col in enumerate(X_tr.columns)})
             else:
                 scores.append(scorer(y_te, preds))
 
@@ -194,88 +196,3 @@ class IrrelevantCatDetector(BasePreprocessor):
             return X
 
         return X.drop(self.irrelevant_features, axis=1)
-
-
-if __name__ == "__main__":
-    import os
-    from tabprep.utils import *
-    import openml
-    benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
-    dataset_name = 'Marketing'
-    for benchmark in ['TabArena']: # ["Grinsztajn", "TabArena", "TabZilla"]:
-        exp_name = f"EXP_dropcat{benchmark}"
-        if False: #os.path.exists(f"{exp_name}.pkl"):
-            with open(f"{exp_name}.pkl", "rb") as f:
-                results = pickle.load(f)
-        else:
-            results = {}
-            results['performance'] = {}
-            results['drop_cols'] = {}
-            results['significances'] = {}
-
-        tids, dids = get_benchmark_dataIDs(benchmark)  
-
-        remaining_cols = {}
-
-        for tid, did in zip(tids, dids):
-            task = openml.tasks.get_task(tid)  # to check if the datasets are available
-            data = openml.datasets.get_dataset(did)  # to check if the datasets are available
-            # if dataset_name not in data.name:
-            #     continue
-        
-            
-            if data.name in results['performance']:
-                print(f"Skipping {data.name} as it already exists in results.")
-                print(pd.DataFrame(results['performance'][data.name]).mean().sort_values(ascending=False))
-                continue
-            # else:
-            #     break
-            print(data.name)
-            if data.name == 'guillermo':
-                continue
-            X, _, _, _ = data.get_data()
-            y = X[data.default_target_attribute]
-            X = X.drop(columns=[data.default_target_attribute])
-            
-            # X = X.sample(n=1000)
-            # y = y.loc[X.index]
-
-            if benchmark == "Grinsztajn" and X.shape[0]>10000:
-                X = X.sample(10000, random_state=0)
-                y = y.loc[X.index]
-
-            if task.task_type == "Supervised Classification":
-                target_type = "binary" if y.nunique() == 2 else "multiclass"
-            else:
-                target_type = 'regression'
-            if target_type=="multiclass":
-                # TODO: Fix this hack
-                y = (y==y.value_counts().index[0]).astype(int)  # make it binary
-                target_type = "binary"
-            elif target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
-                y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
-            else:
-                y = y.astype(float)
-            
-            detector = IrrelevantCatDetector(
-                target_type=target_type, 
-                method='CV',  # 'CV' or 'LOO'
-                n_folds=5, cv_method='regular'
-                )
-
-            detector.fit(X, y)
-            X_new = detector.transform(X)
-            print(f"New columns ({len(detector.irrelevant_features)}): {detector.irrelevant_features}")
-            # print(pd.DataFrame(detector.significances))
-            # print(pd.DataFrame({col: pd.DataFrame(detector.scores[col]).mean().sort_values() for col in detector.scores}).transpose())
-            # print(detector.linear_features.keys())
-            results['performance'][data.name] = detector.scores
-            results['significances'][data.name] = detector.significances
-            results['drop_cols'][data.name] = detector.irrelevant_features
-            
-        with open(f"{exp_name}.pkl", "wb") as f:
-            pickle.dump(results, f)
-        break
-
-
-

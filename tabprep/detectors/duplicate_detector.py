@@ -4,9 +4,10 @@ from regex import D
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 
-from tabprep.utils import sample_from_set
+from tabprep.utils.misc import sample_from_set
 from itertools import combinations 
-from tabprep.utils import make_cv_function, p_value_wilcoxon_greater_than_zero
+from tabprep.utils.eval_utils import p_value_wilcoxon_greater_than_zero
+from tabprep.utils.modeling_utils import make_cv_function
 from tabprep.proxy_models import TargetMeanRegressor, TargetMeanClassifier
 from itertools import product, combinations
 from category_encoders import LeaveOneOutEncoder
@@ -20,7 +21,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
-from tabprep.preprocessors import DuplicateCountAdder
+from tabprep.old_preprocessors import DuplicateCountAdder
 
 def make_cv_function_for_duplicated_data(target_type, n_folds=5, early_stopping_rounds=20, 
                     random_state=42, 
@@ -151,7 +152,7 @@ def make_cv_function_for_duplicated_data(target_type, n_folds=5, early_stopping_
 
     return cv_func
 
-from tabprep.base_preprocessor import BasePreprocessor
+from tabprep.detectors.base_preprocessor import BasePreprocessor
 class DuplicateDetector(BasePreprocessor):
     def __init__(self, 
                  target_type, 

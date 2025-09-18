@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from itertools import combinations 
-from tabprep.utils import make_cv_function, clean_feature_names
+from tabprep.old_utils import make_cv_function, clean_feature_names
 from tabprep.proxy_models import TargetMeanRegressor, TargetMeanClassifier, UnivariateLinearRegressor, UnivariateLogisticClassifier
 from itertools import combinations
 from sklearn.preprocessing import LabelEncoder
@@ -173,7 +173,7 @@ class FeatureSelector(BasePreprocessor):
 
 if __name__ == "__main__":
     import os
-    from tabprep.utils import *
+    from tabprep.old_utils import *
     import openml
     benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
     dataset_name = 'hiva'

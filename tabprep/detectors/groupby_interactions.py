@@ -1,14 +1,15 @@
 import numpy as np
 import pandas as pd
 from sklearn.pipeline import Pipeline
-from tabprep.utils import sample_from_set
+from tabprep.utils.misc import sample_from_set
 from itertools import combinations 
-from tabprep.utils import make_cv_function, p_value_wilcoxon_greater_than_zero
+from tabprep.utils.modeling_utils import make_cv_function
+from tabprep.utils.eval_utils import p_value_wilcoxon_greater_than_zero
 from tabprep.proxy_models import TargetMeanRegressor, TargetMeanClassifier
 from itertools import product, combinations
 from category_encoders import LeaveOneOutEncoder
 from sklearn.metrics import roc_auc_score, root_mean_squared_error
-from tabprep.base_preprocessor import BasePreprocessor
+from tabprep.detectors.base_preprocessor import BasePreprocessor
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.preprocessing import OrdinalEncoder
 
@@ -93,6 +94,7 @@ class GroupByFeatureEngineer(BasePreprocessor):
         self.use_mvp = use_mvp
         self.mean_difference = mean_difference
         self.num_as_cat = num_as_cat
+        self.__name__ = "GroupByFeatureEngineer"
 
         if self.target_type=='regression':
             self.target_model = TargetMeanRegressor()
@@ -255,6 +257,11 @@ class GroupByFeatureEngineer(BasePreprocessor):
         X_cat = X.loc[:,(X.nunique()>=self.min_cardinality).values].select_dtypes(include=['category', 'object'])#.astype('U') #TODO: Check whether astype assignment at this point is best
         X_num = X.loc[:,(X.nunique()>=self.min_cardinality).values].select_dtypes(exclude=['category', 'object'])
 
+        if len(X_cat.columns) < 1 or len(X_num.columns) < 1:
+            print("Not enough categorical or numerical features found. Returning original DataFrame.")
+            self.new_col_set = []
+            return self
+
         if self.num_as_cat:
             X_cat = pd.concat([X_cat, X_num], axis=1)
 
@@ -321,87 +328,4 @@ class GroupByFeatureEngineer(BasePreprocessor):
             X_out = pd.concat([X_out, X_new], axis=1)
 
         return X_out
-
-
-if __name__ == "__main__":
-    import os
-    from tabprep.utils import *
-    import openml
-    benchmark = "TabArena"  # or "TabArena", "TabZilla", "Grinsztajn"
-    dataset_name = 'kdd'
-    for benchmark in ['TabArena']: # ["Grinsztajn", "TabArena", "TabZilla"]:
-        exp_name = f"EXP_groupby{benchmark}"
-        if False: #os.path.exists(f"{exp_name}.pkl"):
-            with open(f"{exp_name}.pkl", "rb") as f:
-                results = pickle.load(f)
-        else:
-            results = {}
-            results['performance'] = {}
-            results['new_cols'] = {}
-            results['significances'] = {}
-
-        tids, dids = get_benchmark_dataIDs(benchmark)  
-
-        remaining_cols = {}
-
-        for tid, did in zip(tids, dids):
-            task = openml.tasks.get_task(tid)  # to check if the datasets are available
-            data = openml.datasets.get_dataset(did)  # to check if the datasets are available
-            if dataset_name in data.name:
-                continue
-        
-            
-            if data.name in results['performance']:
-                print(f"Skipping {data.name} as it already exists in results.")
-                print(pd.DataFrame(results['performance'][data.name]).mean().sort_values(ascending=False))
-                continue
-            # else:
-            #     break
-            print(data.name)
-            if data.name == 'guillermo':
-                continue
-            X, _, _, _ = data.get_data()
-            y = X[data.default_target_attribute]
-            X = X.drop(columns=[data.default_target_attribute])
-            
-            # X = X.sample(n=1000)
-            # y = y.loc[X.index]
-
-            if benchmark == "Grinsztajn" and X.shape[0]>10000:
-                X = X.sample(10000, random_state=0)
-                y = y.loc[X.index]
-
-            if task.task_type == "Supervised Classification":
-                target_type = "binary" if y.nunique() == 2 else "multiclass"
-            else:
-                target_type = 'regression'
-            if target_type=="multiclass":
-                # TODO: Fix this hack
-                y = (y==y.value_counts().index[0]).astype(int)  # make it binary
-                target_type = "binary"
-            elif target_type=="binary" and y.dtype not in ["int", "float", "bool"]:
-                y = (y==y.value_counts().index[0]).astype(int)  # make it numeric
-            else:
-                y = y.astype(float)
-
-            detector = GroupByFeatureEngineer(
-                target_type=target_type,
-                execution_mode='all',
-                use_mvp=True,
-            )
-
-            detector.fit(X, y)
-            X_new = detector.transform(X)
-            print(f"New columns ({X_new.shape[1] - X.shape[1]}): {list(set(X_new.columns)-set(X.columns))}")
-            # print(pd.DataFrame(detector.significances))
-            print(pd.DataFrame({col: pd.DataFrame(detector.scores[col]).mean().sort_values() for col in detector.scores}).transpose())
-            # print(detector.linear_features.keys())
-            results['performance'][data.name] = detector.scores
-            results['significances'][data.name] = detector.significances
-            results['new_cols'][data.name] = list(set(X_new.columns)-set(X.columns))
-            
-        with open(f"{exp_name}.pkl", "wb") as f:
-            pickle.dump(results, f)
-        break
-
 

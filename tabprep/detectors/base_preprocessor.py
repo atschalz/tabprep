@@ -3,14 +3,16 @@ import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.pipeline import Pipeline
-from tabprep.utils import make_cv_function
+
 from tabprep.proxy_models import TargetMeanClassifier, TargetMeanRegressor, UnivariateLinearRegressor, UnivariateLogisticClassifier, PolynomialRegressor, PolynomialLogisticClassifier, \
-    LightGBMBinner, KMeansBinner, CustomLinearModel
-import lightgbm as lgb
-from tabprep.utils import clean_feature_names
+    LightGBMBinner, KMeansBinner, CustomLinearModel, TargetMeanClassifierCut, TargetMeanRegressorCut
+from tabprep.utils.modeling_utils import adapt_lgb_params, adjust_target_format, make_cv_function, clean_feature_names
+
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import QuantileTransformer, LabelEncoder
+from sklearn.preprocessing import QuantileTransformer, OrdinalEncoder
 import time
+
+import lightgbm as lgb
 from typing import Literal
 
 class BasePreprocessor(TransformerMixin, BaseEstimator):
@@ -26,6 +28,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
                 multi_as_bin=True,  # If True, treat multi-class as binary for the purpose of interaction tests
                  ):
         # Parameters
+        # NOTE: Idea: Reinvent interaction test by first categorizing a dataset into 1) there are already clear categorical features; 2) there are only numerical features; 3) there are only numerical features, but many categorical candidates. And based on that use different interaction tests.
         # TODO: Implement (optional) multi-class functionality.
         # Changes to base preprocessor parameters:
         if target_type == 'multiclass' and multi_as_bin:
@@ -43,18 +46,18 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         self.multi_as_bin = multi_as_bin  # If True, treat multi-class as binary for the purpose of interaction tests
 
         # Functions
-        self.cv_func = make_cv_function(target_type=self.target_type, early_stopping_rounds=20, vectorized=False, random_state=self.random_state)
+        self.cv_func = make_cv_function(target_type=self.target_type, vectorized=False, random_state=self.random_state)
         # TODO: Speedups from vectorization need to be properly evaluated before using vectorized functions
         # self.cv_scores_with_early_stopping_vec = make_cv_function(target_type=self.target_type, early_stopping_rounds=20, vectorized=True)
 
         if self.significance_method == 'wilcoxon':
-            from tabprep.utils import p_value_wilcoxon_greater_than_zero
+            from tabprep.utils.eval_utils import p_value_wilcoxon_greater_than_zero
             self.significance_test = p_value_wilcoxon_greater_than_zero
         elif self.significance_method == 'ttest':
-            from tabprep.utils import p_value_ttest_greater_than_zero
+            from tabprep.utils.eval_utils import p_value_ttest_greater_than_zero
             self.significance_test = p_value_ttest_greater_than_zero
         elif self.significance_method == 'median':
-            from tabprep.utils import p_value_sign_test_median_greater_than_zero
+            from tabprep.utils.eval_utils import p_value_sign_test_median_greater_than_zero
             self.significance_test = p_value_sign_test_median_greater_than_zero
 
         # Output variables
@@ -62,19 +65,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         self.significances = {}
         self.times = {}
 
-    def adjust_target_format(self, y):
-        y_out = y.copy()
-        if self.target_type == "binary":
-            y_out = (y==y.value_counts().index[0]).astype(int)        
-        elif self.target_type == "multiclass" and self.multi_as_bin:
-            y_out = (y==y.value_counts().index[0]).astype(int)        
-        elif self.target_type == "multiclass" and not self.multi_as_bin:
-            self.multiclass_encoder = LabelEncoder()
-            y_out = pd.Series(LabelEncoder().fit_transform(y), index=y.index, name=y.name)
-        else:
-            y_out = y.astype(float)
-
-        return y_out
+        self.adjust_target_format = lambda y: adjust_target_format(y,  self.target_type, multi_as_bin=self.multi_as_bin)
 
     def get_dummy_mean_scores(self, X, y, return_preds=False):
         X_use = X.copy()
@@ -92,21 +83,23 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
 
             # dummy baseline on single column
             dummy_pipe = Pipeline([("model", DummyRegressor(strategy='mean') if self.target_type=="regression" else DummyClassifier(strategy='prior'))])
-            self.scores[col]["dummy"] = self.cv_func(x_use.to_frame(), y, dummy_pipe)
+            self.scores[col]["dummy"] = self.cv_func(x_use.to_frame(), y, dummy_pipe)['scores']
             
             model = (TargetMeanClassifier() if self.target_type=="binary"
                     else TargetMeanRegressor())
             pipe = Pipeline([("model", model)])
             if return_preds:
-                self.scores[col]["mean"], preds_ = self.cv_func(x_use.to_frame(), y, pipe, return_preds=True)
+                self.scores[col]["mean"], preds_ = self.cv_func(x_use.to_frame(), y, pipe, return_preds=True)['scores']
                 preds[col] = preds_
             else:
-                self.scores[col]["mean"] = self.cv_func(x_use.to_frame(), y, pipe)
+                self.scores[col]["mean"] = self.cv_func(x_use.to_frame(), y, pipe)['scores']
 
             self.significances[col]["test_irrelevant_mean"] = self.significance_test(
                 self.scores[col]["mean"] - self.scores[col]["dummy"]
             )
 
+    # TODO: Add derange test using the function in utils.misc
+    # TODO: Add grouped interpolation test from utils.misc
 
     def single_interpolation_test(
             self,
@@ -133,7 +126,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
             ("model", interpol_model)
         ])
 
-        return self.cv_func(x.to_frame(), y, pipe)
+        return self.cv_func(x.to_frame(), y, pipe)['scores']
     
     def single_combination_test(
             self,
@@ -169,7 +162,89 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         else:
             raise ValueError(f"Unsupported binning strategy: {binning_strategy}. Use 'lgb', 'KMeans' or 'DT'.")            
 
-        return self.cv_func(x.to_frame(), y, pipe)
+        return self.cv_func(x.to_frame(), y, pipe)['scores']
+    
+    def cat_threshold_test(self, X, y, early_stopping=True, verbose=False):
+        X_use = X.copy()
+        remaining_cols = X_use.columns.tolist()
+        # for q in np.linspace(0.1,1,max_binning_configs, endpoint=False):
+
+        if self.target_type == 'regression':
+            target_cut_model = lambda t: TargetMeanRegressorCut(t)
+        else:
+            target_cut_model = lambda t: TargetMeanClassifierCut(t)
+
+        for cnum, col in enumerate(X_use.columns):            
+            if cnum==0:
+                minus_done = 0
+            possible_thresholds = X_use[col].value_counts(ascending=True).unique()
+            for thresh in possible_thresholds:
+                if early_stopping and len(remaining_cols)==0:
+                    break                
+                if early_stopping and col not in remaining_cols: # early_stopping=True is used if we just want to quickly find numeric features. If best performance matters, we would rather try all bins
+                    minus_done += 1
+                    continue                
+                if verbose:
+                    print(f"\rCat-Threshold test with max_bin of {thresh}: {cnum-minus_done+1}/{len(remaining_cols)} columns processed", end="", flush=True)
+
+                x_use = X_use[col].copy()
+                pipe = Pipeline([
+                    ("model", target_cut_model(thresh))
+                ])
+                self.scores[col][f"cat_threshold_test_{thresh}"] = self.cv_func(X[[col]], y, pipe)['scores']
+
+                self.significances[col][f"test_cat_threshold_test_{thresh}_superior"] = self.significance_test(
+                        self.scores[col][f"cat_threshold_test_{thresh}"] - self.scores[col]["mean"]
+                    )
+
+                self.significances[col][f"test_mean_superior_to_cat_threshold{thresh}"] = self.significance_test(
+                        self.scores[col]["mean"] - self.scores[col][f"cat_threshold_test_{thresh}"]
+                    )
+
+                self.significances[col][f"cat_threshold{thresh}_superior_to_dummy"] = self.significance_test(
+                        self.scores[col][f"cat_threshold_test_{thresh}"] - self.scores[col]["dummy"]
+                    )
+                
+                if early_stopping and self.significances[col][f"test_mean_superior_to_cat_threshold{thresh}"] < self.alpha:
+                    remaining_cols.remove(col)
+                    break
+
+    def get_target_rep_type(self, X, y):
+        
+        # 1. Get all dummy-mean scores
+        self.get_dummy_mean_scores(X, y)
+
+        X_cat = X.select_dtypes(include=['object', 'category'])
+        X_num = X.select_dtypes(exclude=['object', 'category'])
+
+        assert X_cat.shape[1] + X_num.shape[1] ==  X.shape[1], "Not all features covered through num/cat selection."
+
+        if X_num.shape[1] > 0:
+            # 2. Get all combination scores
+            comb_cols = self.combination_test(X_num, y, early_stopping=False)
+            
+            # 3. Get linear scores
+            linear_cols = self.interpolation_test(X_num, y, max_degree=1)
+
+        if X_cat.shape[1] > 0:
+            self.cat_threshold_test(X_cat, y)
+
+        for col in X.columns:
+            self.feature_target_rep[col] = pd.Series(pd.DataFrame(self.scores[col]).mean().sort_values()).idxmax()
+            
+        num_as_cat = [self.feature_target_rep[col]=='mean' for col in X.columns]
+        if any(num_as_cat):
+            self.cat_threshold_test(X.loc[: , num_as_cat], y)
+
+    def cat_as_num(self, X_in):
+        X_out = X_in.copy()
+        for col in X_out.select_dtypes(include=['object', 'category']).columns:
+            num_convertible = pd.to_numeric(X_out[col].dropna(), errors='coerce').notna().all()
+            if num_convertible:
+                X_out[col] = pd.to_numeric(X_out[col], errors='coerce')
+            else:
+                X_out[col] = OrdinalEncoder().fit_transform(X_out[[col]]).flatten()
+        return X_out
 
     def adapt_lgb_params(self, X: pd.DataFrame, y: pd.Series = None, base_params: dict=None, lgb_model_type=None, target_type=None):
         if lgb_model_type is None:
@@ -284,6 +359,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
             
         return X_out
 
+    # TODO: Probably, we can safely remove this function for now
     def get_lgb_performance(self, X_cand_in, y_in, lgb_model_type=None, 
                             custom_prep=None, residuals=None, scale_y=None,
                             reg_assign_closest_y=False,
@@ -297,15 +373,17 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         X[obj_cols] = X[obj_cols].astype('category')
         # Adapt data adnd train models
         if residuals is not None:
-            params = self.adapt_lgb_params(X, y=y, lgb_model_type=lgb_model_type, target_type='regression')
+            params = adapt_lgb_params(target_type='regression', lgb_model_type=lgb_model_type, X=X, y=y)
             model = lgb.LGBMRegressor(**params)
             original_y = y.copy()
-            if residuals == 'linear_residuals':
+            if isinstance(residuals,str) and residuals == 'linear_residuals':
                 y_use = y.copy()
-            else:
+            elif isinstance(residuals,pd.Series):
                 y_use = residuals
+            else:
+                raise ValueError(f"Unknown residuals option: {residuals}. Use 'linear_residuals' or provide a pd.Series with the residuals.")
         else:
-            params = self.adapt_lgb_params(X, y=y, lgb_model_type=lgb_model_type)
+            params = adapt_lgb_params(target_type=self.target_type, lgb_model_type=lgb_model_type, X=X, y=y)
             model = lgb.LGBMClassifier(**params) if self.target_type in ["binary", 'multiclass'] else lgb.LGBMRegressor(**params)
             original_y = None
             y_use = y
@@ -344,7 +422,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
             prefix = "LGB-full"
         
         # TODO: Change to get_lgb_params
-        params = self.adapt_lgb_params(X_cand[X_cand.nunique().idxmax()])
+        params = adapt_lgb_params(self.target_type, X_cand[X_cand.nunique().idxmax()])
 
         self.scores[prefix] = {}
         self.significances[prefix] = {}
@@ -360,7 +438,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         X_use = self.adapt_for_mvp_test(X_use, col=None, test_cols=test_cols, mode='backward')
         model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
         pipe = Pipeline([("model", model)])
-        self.scores[prefix]['raw'] = self.cv_func(clean_feature_names(X_use), y, pipe, return_iterations=False)
+        self.scores[prefix]['raw'] = self.cv_func(clean_feature_names(X_use), y, pipe, return_iterations=False)['scores']
         
         ### Get performance for all columns with interactions
         X_use = X_cand.copy() 
@@ -372,7 +450,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
         X_use = self.adapt_for_mvp_test(X_use, col=None, test_cols=test_cols, mode='forward')
         model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
         pipe = Pipeline([("model", model)])
-        self.scores[prefix][f"{len(test_cols)}-{suffix}"] = self.cv_func(clean_feature_names(X_use), y, pipe)
+        self.scores[prefix][f"{len(test_cols)}-{suffix}"] = self.cv_func(clean_feature_names(X_use), y, pipe)['scores']
 
         self.significances[prefix][f"{len(test_cols)}-{suffix}"] = self.significance_test(self.scores[prefix][f"{len(test_cols)}-{suffix}"]-self.scores[prefix]['raw'])
 
@@ -436,7 +514,7 @@ class BasePreprocessor(TransformerMixin, BaseEstimator):
                 # TODO: Make sure to prevent leaks with category dtypes
                 model = lgb.LGBMClassifier(**params) if self.target_type=="binary" else lgb.LGBMRegressor(**params)
                 pipe = Pipeline([("model", model)])
-                self.scores[prefix][f"{col}{suffix}"] = self.cv_func(clean_feature_names(X_use), y, pipe)
+                self.scores[prefix][f"{col}{suffix}"] = self.cv_func(clean_feature_names(X_use), y, pipe)['scores']
 
                 self.significances[prefix][f"{col}{suffix}_superior_{ref_config}"] = self.significance_test(self.scores[prefix][f"{col}{suffix}"]-use_scores)
 
