@@ -8,6 +8,8 @@ requirements = [
     "pytest",
     "typing-extensions>=4.11,<5",  # used for `Self` type hint
     "huggingface-hub",
+    'kditransform',
+    'skrub',
 ]
 
 extras_require = {
