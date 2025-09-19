@@ -7,6 +7,7 @@ from tabprep.proxy_models import TargetMeanRegressor, TargetMeanClassifier
 from itertools import combinations, product
 import re
 from tabprep.utils.misc import drop_highly_correlated_features
+from sklearn.preprocessing import StandardScaler
 
 '''
 Next steps:
@@ -21,6 +22,7 @@ class NumericalInteractionDetector(BasePreprocessor):
                  target_type, 
                 n_folds=5, alpha=0.1, significance_method='wilcoxon', mvp_criterion='significance', mvp_max_cols_use=100, verbose=True,
                 interaction_types: list = ['+', '-', '/', 'x'], # ['+', '-', '/', 'x', '&']
+                scale_X=False,
                 use_mvp=True,
                 corr_thresh = 0.95,
                 select_n_candidates=None,
@@ -36,6 +38,7 @@ class NumericalInteractionDetector(BasePreprocessor):
         # TODO: Include possibility to select operators
         super().__init__(target_type=target_type, n_folds=n_folds, alpha=alpha, significance_method=significance_method, mvp_criterion=mvp_criterion, mvp_max_cols_use=mvp_max_cols_use, verbose=verbose)
         self.interaction_types = interaction_types
+        self.scale_X = scale_X
         self.use_mvp = use_mvp
         self.corr_thresh = corr_thresh
         self.select_n_candidates = select_n_candidates
@@ -429,10 +432,17 @@ class NumericalInteractionDetector(BasePreprocessor):
         X_num = self.remove_mostlynan_features(X_num)
         # X_num = self.remove_constant_features(X_num)
         
-        if len(X_num.columns) <2:
+        self.use_num_cols = X_num.columns.tolist()
+
+        if len(self.use_num_cols) <2:
             self.detection_attempted = False
             self.new_cols = []
             return self
+
+        if self.scale_X:
+            self.scaler = StandardScaler() 
+            X_num = pd.DataFrame(self.scaler.fit_transform(X_num), columns=X_num.columns, index=X_num.index)
+
         X_int = self.get_all_possible_interactions(X_num, order=2, max_base_interactions=self.max_base_interactions)
         
         ### NEW
@@ -524,27 +534,33 @@ class NumericalInteractionDetector(BasePreprocessor):
 
         return self
     
-    def transform(self, X):
-        X_out = X.copy()
+    def transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+        if len(self.new_cols) == 0:
+            return X_in.copy()
+        X = X_in.copy()
+        X_num = X[self.use_num_cols]
+        if self.scale_X:
+            X_num = pd.DataFrame(self.scaler.transform(X_num), columns=X_num.columns, index=X_num.index)
+
         new_cols = []
         for col in self.new_cols:
             feature_names = [f for f in re.split(r'_(x|/|\+|\-)_', col) if f not in {'x', '/', '+', '-'}]
             op_names = [f for f in re.split(r'_(x|/|\+|\-)_', col) if f in {'x', '/', '+', '-'}]
             # eval_str = "".join([f'X_out["{f}"]' if f not in {'x', '/', '+', '-'} else f for f in re.split(r'_(x|/|\+|\-)_', col)])
-            new_feat = X_out[feature_names[0]].copy()
+            new_feat = X_num[feature_names[0]].copy()
             for f, op in zip(feature_names[1:], op_names):
                 if op == 'x':
-                    new_feat *= X_out[f]
+                    new_feat *= X_num[f]
                 elif op == '/':
-                    new_feat /= X_out[f].replace(0, np.nan)
+                    new_feat /= X_num[f].replace(0, np.nan)
                 elif op == '+':
-                    new_feat += X_out[f]
+                    new_feat += X_num[f]
                 elif op == '-':
-                    new_feat -= X_out[f]
+                    new_feat -= X_num[f]
                 else:
                     raise ValueError(f"Unknown operator: {op}")
             new_feat.name = col
             new_cols.append(new_feat)
-        X_out = pd.concat([X_out] + new_cols, axis=1)
+        X_out = pd.concat([X] + new_cols, axis=1)
 
         return X_out

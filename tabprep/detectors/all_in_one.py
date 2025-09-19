@@ -7,7 +7,7 @@ from sklearn.metrics import roc_auc_score, root_mean_squared_error, log_loss
 from tabprep.proxy_models import  CustomLinearModel
 from tabprep.utils.modeling_utils import make_cv_function, clean_feature_names
 from tabprep.detectors.base_preprocessor import BasePreprocessor
-from tabprep.old_preprocessors import TargetRepresenter, FreqAdder, CatIntAdder, CatGroupByAdder, SVDConcatTransformer, CatAsNumTransformer, CatOHETransformer, CatLOOTransformer, DuplicateCountAdder, DuplicateContentLOOEncoder, LinearFeatureAdder, OOFLinearFeatureAdder
+from tabprep.old_preprocessors import TargetRepresenter, LinearFeatureAdder
 from tabprep.detectors.num_interaction import NumericalInteractionDetector
 from tabprep.detectors.groupby_interactions import GroupByFeatureEngineer
 
@@ -15,6 +15,13 @@ from category_encoders import LeaveOneOutEncoder
 from autogluon.features.generators.drop_duplicates import DropDuplicatesFeatureGenerator
 
 from tabprep.utils.modeling_utils import adapt_lgb_params, adjust_target_format
+
+from tabprep.preprocessors.frequency import FrequencyEncoder
+from tabprep.preprocessors.categorical import CatIntAdder, CatGroupByAdder, OneHotPreprocessor, CatLOOTransformer
+from tabprep.preprocessors.type_change import CatAsNumTransformer
+from tabprep.preprocessors.multivariate import SVDPreprocessor, DuplicateCountAdder
+
+# from tabprep.preprocessors.misc 
 
 from typing import Union, Optional, List, Callable, Literal, Dict, Any
 
@@ -189,7 +196,7 @@ class AllInOneEngineer():
 
                 if t == 'cat_freq':
                     # Only test extensively if there are candidate categorical features
-                    cat_freq = FreqAdder()
+                    cat_freq = FrequencyEncoder()
                     candidate_cols = cat_freq.filter_candidates_by_distinctiveness(X[cat_cols])
                     if len(candidate_cols) == 0:
                         continue
@@ -558,16 +565,16 @@ class AllInOneEngineer():
                     skip_techniques.extend([t for t in applicable_techniques[idx+1:] if t in cat_techniques])
             elif t == 'cat_freq':
                 # TODO: avoid testing for distinctive cat freq twice (currently also done during technique filtering). Could be done by saving candidate_cols and explicitly providing them
-                self.detect_general(X, y, lambda: FreqAdder(), 'cat_freq', add_to_running=False, base_preds=base_preds)
+                self.detect_general(X, y, lambda: FrequencyEncoder(), 'cat_freq', add_to_running=False, base_preds=base_preds)
             # TODO: Properly integrate cat_as_loo and cat_as_ohe
             elif t == 'cat_as_loo':
                 self.detect_general(X, y, lambda: CatLOOTransformer(), 'cat_as_loo', add_to_running=False, base_preds=base_preds)
             elif t == 'cat_as_ohe':
                 # TODO: Might consider using from tabprep.preprocessors import FrequencyOHE
 
-                self.detect_general(X, y, lambda: CatOHETransformer(), 'cat_as_ohe', add_to_running=False, base_preds=base_preds)
+                self.detect_general(X, y, lambda: OneHotPreprocessor(), 'cat_as_ohe', add_to_running=False, base_preds=base_preds)
             elif t == 'SVD':
-                self.detect_general(X, y, lambda: SVDConcatTransformer(), 'SVD', add_to_running=False, base_preds=base_preds)
+                self.detect_general(X, y, lambda: SVDPreprocessor(), 'SVD', add_to_running=False, base_preds=base_preds)
             elif t == 'cat_int':
                 self.detect_cat_interactions(X, y)
             elif t == 'cat_groupby':
