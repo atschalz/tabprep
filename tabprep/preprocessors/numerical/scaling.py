@@ -1,11 +1,33 @@
 import pandas as pd
 import numpy as np
 from tabprep.preprocessors.base import NumericBasePreprocessor
-from sklearn.preprocessing import QuantileTransformer, RobustScaler
+from sklearn.preprocessing import QuantileTransformer, RobustScaler, StandardScaler
 from skrub import SquashingScaler
 from kditransform import KDITransformer
 
 from typing import Literal
+
+# TODO: Check whether a common base preprocessor for scalers makes sense
+class StandardScalerPreprocessor(NumericBasePreprocessor):
+    def __init__(self, 
+                 keep_original: bool = False,
+                #  scaler_kwargs: dict = dict(),
+                 ):
+        super().__init__(keep_original=keep_original)
+        self.scaler = StandardScaler()
+
+    def _fit(self, X_in: pd.DataFrame, y_in: pd.Series = None):
+        X = X_in.copy()
+        if len(self.affected_columns_) > 0:
+            self.scaler.fit(X[self.affected_columns_])
+        
+    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+        X = X_in.copy()
+        if len(self.affected_columns_) > 0:
+            X_scaled = self.scaler.transform(X[self.affected_columns_])
+            return pd.DataFrame(X_scaled, columns=[i+'_scaled' for i in X.columns], index=X.index)
+        else:
+            return pd.DataFrame()
 
 class RobustScalerPreprocessor(NumericBasePreprocessor):
     def __init__(self, 
