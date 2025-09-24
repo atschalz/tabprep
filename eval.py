@@ -1,7 +1,7 @@
 import openml
 import pandas as pd
 import numpy as np
-from tabprep.utils import get_benchmark_dataIDs
+from tabprep.utils.eval_utils import get_benchmark_dataIDs
 from tabrepo.nips2025_utils.tabarena_context import TabArenaContext
 import os
 import matplotlib.pyplot as plt

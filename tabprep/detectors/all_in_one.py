@@ -7,7 +7,6 @@ from sklearn.metrics import roc_auc_score, root_mean_squared_error, log_loss
 from tabprep.proxy_models import  CustomLinearModel
 from tabprep.utils.modeling_utils import make_cv_function, clean_feature_names
 from tabprep.detectors.base_preprocessor import BasePreprocessor
-from tabprep.old_preprocessors import TargetRepresenter, LinearFeatureAdder
 from tabprep.detectors.num_interaction import NumericalInteractionDetector
 from tabprep.detectors.groupby_interactions import GroupByFeatureEngineer
 
@@ -15,11 +14,11 @@ from category_encoders import LeaveOneOutEncoder
 from autogluon.features.generators.drop_duplicates import DropDuplicatesFeatureGenerator
 
 from tabprep.utils.modeling_utils import adapt_lgb_params, adjust_target_format
-
+from tabprep.preprocessors.misc import TargetRepresenter
 from tabprep.preprocessors.frequency import FrequencyEncoder
 from tabprep.preprocessors.categorical import CatIntAdder, CatGroupByAdder, OneHotPreprocessor, CatLOOTransformer
 from tabprep.preprocessors.type_change import CatAsNumTransformer
-from tabprep.preprocessors.multivariate import SVDPreprocessor, DuplicateCountAdder
+from tabprep.preprocessors.multivariate import SVDPreprocessor, DuplicateCountAdder, LinearFeatureAdder
 
 # from tabprep.preprocessors.misc 
 

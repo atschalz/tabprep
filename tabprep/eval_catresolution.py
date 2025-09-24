@@ -6,20 +6,32 @@ from ray import method
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.preprocessing import OrdinalEncoder
 import matplotlib.pyplot as plt
-from tabprep.utils import *
 import openml
 import pandas as pd
 from sympy import im, rem
-from tabprep.utils import get_benchmark_dataIDs, get_metadata_df
-from ft_detection import FeatureTypeDetector
+from tabprep.utils.eval_utils import get_benchmark_dataIDs
+from tabprep.utils.tabarena_utils import get_metadata_df
+from tabprep.detectors.ft_detection import FeatureTypeDetector
 
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import roc_auc_score, root_mean_squared_error
+from sklearn.metrics import roc_auc_score, root_mean_squared_error, log_loss
 from sklearn.preprocessing import LabelEncoder
 from sklearn.base import TransformerMixin
 
 from category_encoders import LeaveOneOutEncoder
+
+from tabprep.proxy_models import (
+    TargetMeanRegressor,
+    TargetMeanClassifier,
+    TargetMeanRegressorCut,
+    TargetMeanClassifierCut
+)
+from tabprep.utils.modeling_utils import make_cv_function
+from tabprep.utils.eval_utils import p_value_wilcoxon_greater_than_zero
+from sklearn.dummy import DummyClassifier, DummyRegressor
+
+import lightgbm as lgb
 
 def make_cv_stratified_on_x(target_type, n_folds=5, verbose=False, early_stopping_rounds=20, vectorized=False):
     """CV creation function for vectorized versions of the TargetEncoderModels."""
@@ -63,7 +75,7 @@ def make_cv_stratified_on_x(target_type, n_folds=5, verbose=False, early_stoppin
                 preds = pipeline.predict(X_te)
 
             if vectorized:
-                scores.append({col: scorer(y_te, preds[:,num]) for num, col in enumerate(X_df.columns)})
+                scores.append({col: scorer(y_te, preds[:,num]) for num, col in enumerate(X_tr.columns)})
             else:
                 scores.append(scorer(y_te, preds))
 
@@ -85,7 +97,7 @@ class CatResolutionDetector(TransformerMixin, BaseEstimator):
         self.cv_method = cv_method
 
         if self.cv_method == 'regular':
-            self.cv_func = make_cv_scores_with_early_stopping
+            self.cv_func = make_cv_function
         elif self.cv_method == 'stratified':
             self.cv_func = make_cv_stratified_on_x
 
@@ -176,7 +188,7 @@ class IrrelevantCatDetector(TransformerMixin, BaseEstimator):
         self.cv_method = cv_method
 
         if self.cv_method == 'regular':
-            self.cv_func = make_cv_scores_with_early_stopping
+            self.cv_func = make_cv_function
         elif self.cv_method == 'stratified':
             self.cv_func = make_cv_stratified_on_x
 

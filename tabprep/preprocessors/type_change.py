@@ -16,6 +16,7 @@ class ToCategoricalTransformer(BasePreprocessor):
             only_numerical: bool = False,
             min_cardinality: int = 6
             ):
+        # TODO: Add min_frequency to only transform categories with a minimum frequency
         super().__init__(keep_original=keep_original)
         self.min_cardinality = min_cardinality
         self.only_numerical = only_numerical

@@ -526,7 +526,7 @@ def make_cv_function(
             elif hasattr(pipeline.named_steps['model'], "coef_"):
                 if len (X_tr.columns)>1:
                     feature_importances.append(
-                        pd.Series({col: imp for col,imp in zip(X_tr.columns,pipeline.named_steps['model'].coef_[0])})
+                        pd.Series({col: imp for col,imp in zip(X_tr.columns,pipeline.named_steps['model'].coef_)})
                     )
                 else:
                     feature_importances.append(

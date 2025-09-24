@@ -16,11 +16,11 @@ import yaml
 
 def get_benchmark_metadata(benchmark: str, subset: list[str]=None) -> pd.DataFrame:
     if benchmark == "TabZilla":
-        from tabprep.utils import get_benchmark_dataIDs, get_metadata_df
+        from tabprep.old_utils import get_benchmark_dataIDs, get_metadata_df
         tids, dids = get_benchmark_dataIDs("TabZilla")
         metadata = get_metadata_df(tids, dids)    
     elif benchmark == "Grinsztajn":
-        from tabprep.utils import get_benchmark_dataIDs, get_metadata_df
+        from tabprep.old_utils import get_benchmark_dataIDs, get_metadata_df
         tids, dids = get_benchmark_dataIDs("Grinsztajn")
         metadata = get_metadata_df(tids, dids)    
     elif benchmark == "TabArena":

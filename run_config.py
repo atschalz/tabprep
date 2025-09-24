@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -58,14 +59,15 @@ if __name__ == '__main__':
     with open("tabprep/base_config.yaml", 'r') as stream:
         configs = yaml.safe_load(stream)
 
-    # my_exp_name = "openml"
+    # my_exp_name = configs['exp_name']
+    my_exp_name = "random_test"
     # input_format = "openml"
     # benchmark = "Grinsztajn"
     # use_configs = 10
     # ignore_cache = False  # set to True to overwrite existing caches and re-run experiments from scratch
 
-    expname = str(".." / Path(__file__).parent / "experiments" / configs['benchmark']['name'] / configs['exp_name'])  # folder location to save all experiment artifacts
-    repo_dir = str(".." / Path(__file__).parent / "repos" / configs['benchmark']['name'] / configs['exp_name'])  # Load the repo later via `EvaluationRepository.from_dir(repo_dir)`
+    expname = str("../.." / Path(__file__).parent / "ta_experiments" / configs['benchmark']['name'] / my_exp_name)  # folder location to save all experiment artifacts
+    repo_dir = str("../.." / Path(__file__).parent / "ta_repos" / configs['benchmark']['name'] / my_exp_name)  # Load the repo later via `EvaluationRepository.from_dir(repo_dir)`
     # expname = '/home/ubuntu/cat_detection/experiments/TabArena/current_test2'
     # repo_dir = '/home/ubuntu/cat_detection/repos/TabArena/current_test2'
     
@@ -74,8 +76,8 @@ if __name__ == '__main__':
 
 
     if configs['benchmark']['outer_folds'] == "full":
-        folds = list(range(1))
-        repeats = list(range(1))  # Use all folds in the benchmark, and repeat the experiments for each repeat
+        folds = list(range(3))
+        repeats = list(range(3))  # Use all folds in the benchmark, and repeat the experiments for each repeat
     else:
         folds = list(range(configs['benchmark']['outer_folds']))
         repeats = list(range(configs['benchmark']['repeats']))
@@ -141,7 +143,7 @@ if __name__ == '__main__':
     # for method_name, config in mod_configs.items()]
     
     from tabflow.cli.launch_jobs import JobManager
-    methods_file = "configs_all_new.yaml"  # TODO: Need to create this file
+    methods_file = "configs_all_all_in_one.yaml"  # TODO: Need to create this file
     methods = JobManager.load_methods_from_yaml(methods_file=methods_file)
     methods = methods[:1]
     # from tabrepo.utils.config_utils import generate_bag_experiments
@@ -163,7 +165,26 @@ if __name__ == '__main__':
                                     #     "min_data_in_leaf": 1,
                                     #     "min_data_per_group": 30,
                                     #     "num_leaves": 68},
-                                    model_hyperparameters={key: value for key, value in method['model_hyperparameters'].items() if key != "ag_args_ensemble"},
+                                    # model_hyperparameters={key: value for key, value in method['model_hyperparameters'].items() if key != "ag_args_ensemble"},
+                                    #   model_hyperparameters={"ag_args_ensemble": {"fold_fitting_strategy": "sequential_local"},  # uncomment to fit folds sequentially, allowing for use of a debugger
+                                    #                         **method['model_hyperparameters']},
+                                        # model_hyperparameters= {
+                                        #     'n_estimators': 10000,        # use early stopping on a proper valid set
+                                        #     'lambda_l1': 3.0,
+                                        #     'lambda_l2': 3.0,
+                                        #     'bagging_fraction': 0.7,
+                                        #     'bagging_freq': 1,
+                                        #     'max_cat_to_onehot': 16,
+                                        #     'max_bins': 4,
+                                        # },
+                                        model_hyperparameters= {
+                                                # 'boosting': 'dart'
+                                                'n_estimators': 10000,
+                                                'linear_tree': True, 
+                                                'num_leaves': 2,
+                                                'min_data_in_leaf': 180,      
+                                                'linear_lambda': 10,
+                                        },
                                     # model_hyperparameters={'min_data_in_leaf': 2, **method['model_hyperparameters']},  # Ensure min_data_in_leaf is set to 1
                                     # model_hyperparameters={'min_data_in_leaf': 2, 'max_cat_to_onehot': 30000, **method['model_hyperparameters']},  # Ensure min_data_in_leaf is set to 1
                                     num_bag_folds=method['num_bag_folds'],
@@ -228,7 +249,7 @@ if __name__ == '__main__':
 
         res_df = pd.DataFrame({dat: {method: np.mean(metrics.loc[np.logical_and(metrics.dataset==dat, metrics.method==method), "metric_error"].values) for method in metrics.method.unique()} for dat in metrics.dataset.unique()}).transpose()
         print(res_df)
-        print(res_df[['GBM (default)', 'LightGBM_c1_BAG_L1', 'CAT (default)', 'AutoGluon 1.3 (4h)']])
+        print(res_df[['GBM (default)', 'LightGBM_c1_BAG_L1', 'CAT (default)', 'AutoGluon 1.3 (4h)', 'TABM (tuned + ensemble)']])
         # if new_model_name in ["RealMLP", "RealMLP_priordetect", "RealMLP-original"]:
         #     print(res_df[[f"{new_model_name}", "REALMLP (default)",  "AutoGluon 1.3 (4h)",  "CAT (default)"]])
         # elif new_model_name in ["TabM", "TabM_priordetect", "TabM-original"]:

@@ -9,7 +9,7 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import roc_auc_score, log_loss, root_mean_squared_error, r2_score
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
-from tabprep.utils import make_cv_scores_with_early_stopping
+from tabprep.old_utils import make_cv_scores_with_early_stopping
 import os
 
 

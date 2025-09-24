@@ -9,6 +9,17 @@ import random
 from typing import Literal, Any, Dict
 
 from tabprep.utils.eval_utils import p_value_wilcoxon_greater_than_zero
+from sklearn.preprocessing import OrdinalEncoder
+
+def cat_as_num(X_in):
+    X_out = X_in.copy()
+    for col in X_out.select_dtypes(include=['object', 'category']).columns:
+        num_convertible = pd.to_numeric(X_out[col].dropna(), errors='coerce').notna().all()
+        if num_convertible:
+            X_out[col] = pd.to_numeric(X_out[col], errors='coerce')
+        else:
+            X_out[col] = OrdinalEncoder().fit_transform(X_out[[col]]).flatten()
+    return X_out
 
 def is_misclassified_numeric(series: pd.Series, threshold: float = 0.9) -> bool:
     # TODO: Seems to be unused, consider removing.
