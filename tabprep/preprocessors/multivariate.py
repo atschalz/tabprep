@@ -20,6 +20,9 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge, Lasso, ElasticNet
 from sklearn.preprocessing import OneHotEncoder
 
+from sklearn.kernel_approximation import RBFSampler
+
+
 class SKLearnDecompositionPreprocessor(BasePreprocessor):
     # NOTE: Taken from TabPFNv2 codebase
     def __init__(self, 
@@ -29,12 +32,14 @@ class SKLearnDecompositionPreprocessor(BasePreprocessor):
                  only_numerical: bool = False,
                  non_negative: bool = False,
                  keep_original: bool = True,
+                 n_components: Optional[int] = None,
                  **kwargs
                  ):
         super().__init__(keep_original=keep_original)
         self.scale_X = scale_X
         self.only_numerical = only_numerical
         self.non_negative = non_negative
+        self.n_components = n_components
         # FIXME: Rather use identity preprocessor
         if scale_X:
             self.scaler = StandardScaler()
@@ -98,16 +103,17 @@ class SKLearnDecompositionPreprocessor(BasePreprocessor):
         return affected_columns_, unaffected_columns_
 
     def initialize_transformer(self, X: pd.DataFrame) -> int:
-        n_components = max(
-            1,
-            min(
-                int(X.shape[0] * 0.8) // 10 + 1,
-                X.shape[1] // 2,
-            ),
-        )
+        if self.n_components is None:
+            self.n_components = max(
+                1,
+                min(
+                    int(X.shape[0] * 0.8) // 10 + 1,
+                    X.shape[1] // 2,
+                ),
+            )
 
         self.transformer = self.transformer_cls(
-            n_components=n_components,
+            n_components=self.n_components,
             **self.transformer_init_kwargs
         )
 
@@ -641,3 +647,61 @@ class LinearFeatureAdder(BaseEstimator, TransformerMixin):
                      else [f"{self.prefix}_proba_{c}" for c in self.classes_])
 
         return np.array(base + extra)
+
+import numpy as np
+
+class RandomFourierFeatureTransformer(NumericBasePreprocessor):
+    def __init__(self, n_features=100, gamma=1.0, random_state=None):
+        """
+        n_features: number of Fourier features to generate
+        gamma: RBF kernel parameter (1 / (2 * sigma^2))
+        """
+        super().__init__(keep_original=True)
+        self.n_features = n_features
+        self.gamma = gamma
+        self.random_state = np.random.RandomState(random_state)
+    
+    def _fit(self, X_in, x_in=None):
+        X = X_in.copy()
+        n_input_features = X.shape[1]
+        # Sample random projection matrix W ~ N(0, 2*gamma I)
+        self.W = self.random_state.normal(
+            loc=0, scale=np.sqrt(2 * self.gamma), 
+            size=(n_input_features, self.n_features)
+        )
+        # Random phase b ~ Uniform(0, 2π)
+        self.b = self.random_state.uniform(0, 2*np.pi, size=self.n_features)
+        return self
+    
+    def _transform(self, X_in):
+        X = X_in.copy()
+        projection = X @ self.W + self.b
+        X_out = np.sqrt(2.0 / self.n_features) * np.cos(projection)
+        X_out.columns = [f'rff_{i}' for i in range(self.n_features)]
+        return X_out
+
+class SklearnRandomFourierFeatureTransformer(NumericBasePreprocessor):
+    def __init__(self, n_features=100, gamma=1.0, random_state=None):
+        """
+        n_features: number of Fourier features to generate
+        gamma: RBF kernel parameter (1 / (2 * sigma^2))
+        """
+        super().__init__(keep_original=True)
+        self.n_features = n_features
+        self.gamma = gamma
+        self.random_state = random_state
+    
+    def _fit(self, X_in, x_in=None):
+        X = X_in.copy()
+        self.rff_ = RBFSampler(n_components=self.n_features, gamma=self.gamma, random_state=self.random_state)
+        # TODO: Handle NaNs as with other numerical preprocessors
+        self.rff_.fit(X.fillna(0))
+        return self
+    
+    def _transform(self, X_in):
+        X = X_in.copy()
+        X_out = pd.DataFrame(self.rff_.transform(X.fillna(0)), index=X.index)
+        X_out.columns = [f'rff_{i}' for i in range(self.n_features)]
+        return X_out
+
+
