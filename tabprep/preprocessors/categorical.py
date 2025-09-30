@@ -25,7 +25,8 @@ class CatIntAdder(old_base):
                  num_operations='all', 
                  candidate_cols=None,
                  add_freq=False, 
-                 only_freq=False
+                 only_freq=False,
+                 min_cardinality=6,
                  ):
         super().__init__(target_type=target_type)
 
@@ -36,6 +37,7 @@ class CatIntAdder(old_base):
         self.candidate_cols = candidate_cols
         self.add_freq = add_freq
         self.only_freq = only_freq
+        self.min_cardinality = min_cardinality
 
         self.new_dtypes = {}
 
@@ -80,7 +82,7 @@ class CatIntAdder(old_base):
         
         if self.candidate_cols is None:
             self.candidate_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
-            self.candidate_cols = [i for i in self.candidate_cols if X[i].nunique() > 5]  # TODO: Make this a parameter
+            self.candidate_cols = [i for i in self.candidate_cols if X[i].nunique() >= self.min_cardinality]  # TODO: Make this a parameter
 
         if len(self.candidate_cols) < self.max_order:
             self.new_col_set = []
@@ -345,4 +347,27 @@ class CatLOOTransformer(CategoricalBasePreprocessor):
         X_out.columns = [i + '_LOO' for i in X_out.columns]
 
         return X_out
+
+
+class DropCatTransformer(CategoricalBasePreprocessor):
+    def __init__(self):
+        super().__init__(keep_original=False)
+        self.drop_cols = []
+
+    def _fit(self, X_in: pd.DataFrame, y_in: pd.Series):
+        self.drop_cols = X_in.columns.tolist()
+        if len(self.drop_cols) == 0:
+            print("Warning: No categorical columns to drop.")
+
+    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame(index=X_in.index)
+
+    def _get_affected_columns(self, X: pd.DataFrame):
+        affected_columns_, unaffected_columns_ = super()._get_affected_columns(X)
+        if len(affected_columns_) == X.shape[1]:
+            print("Warning: Dataset has only categorical columns. Don't attempt dropping them.")
+            affected_columns_ = []
+            unaffected_columns_ = X.columns.tolist()
+        return affected_columns_, unaffected_columns_
+        
 
