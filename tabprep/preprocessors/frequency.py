@@ -6,10 +6,12 @@ class FrequencyEncoder(BasePreprocessor):
                  keep_original: bool = True,
                  only_categorical: bool = True,
                  candidate_cols: list = None, 
+                 use_filters: bool = True,
                  ):
         super().__init__(keep_original=keep_original)
         self.only_categorical = only_categorical
         self.candidate_cols = candidate_cols
+        self.use_filters = use_filters
         
         self.freq_maps = {}
 
@@ -55,8 +57,8 @@ class FrequencyEncoder(BasePreprocessor):
                 affected_columns_ = X.select_dtypes(include=['category', 'object']).columns.tolist()
             else:
                 affected_columns_ = X.columns.tolist()
-            
-            affected_columns_ = self.filter_candidates_by_distinctiveness(X[affected_columns_])
+            if self.use_filters:
+                affected_columns_ = self.filter_candidates_by_distinctiveness(X[affected_columns_])
         else:
             affected_columns_ = self.candidate_cols
         
