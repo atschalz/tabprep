@@ -87,9 +87,9 @@ class OptimalBinner(NumericBasePreprocessor):
             x_col = X[[col]].copy()
             x_col = x_col.dropna()
             # TODO: Fix many-nan setting
-            if x_col.shape[0] < 10:
-                continue
             y_col = y[x_col.index]
+            if x_col.shape[0] < 10 or y_col.value_counts().min() < 5: # FIXME Make folds a parameter instead of using 5
+                continue
             # start with no binning (baseline)
             est = Pipeline([
                 # ('fillna', SimpleImputer(strategy='mean')),
@@ -136,3 +136,65 @@ class OptimalBinner(NumericBasePreprocessor):
             X_out.loc[mask,col] = binner.transform(X_out.loc[mask,[col]]).ravel()
         
         return X_out
+
+
+class NearestNeighborDistanceTransformer(NumericBasePreprocessor):
+    def __init__(self, keep_original=True, min_cardinality=6):
+        super().__init__(keep_original=keep_original)
+        self.min_cardinality = min_cardinality
+        
+    def _fit(self, X_in, y=None):
+        self.unique_values_per_col = {
+            col: np.sort(X_in[col].dropna().unique())
+            for col in X_in.columns
+        }
+        return self
+    
+    def _transform(self, X_in):
+        X_out = pd.DataFrame(index=X_in.index)
+        for col in X_in.columns:
+            if col not in self.unique_values_per_col:
+                continue  # column not fitted
+
+            uniques = self.unique_values_per_col[col]
+
+            # compute nearest neighbor distance for each value
+            col_values = X_in[col].values.reshape(-1, 1)
+            diffs = np.abs(col_values - uniques.reshape(1, -1))
+            nearest_dist = diffs.min(axis=1)
+
+            X_out[f"{col}_nn_dist"] = nearest_dist
+        
+        return X_out
+    
+    def _get_affected_columns(self, X: pd.DataFrame):
+        affected_columns_ = super()._get_affected_columns(X)[0]
+        affected_columns_ = [col for col in affected_columns_ if X[col].nunique() > self.min_cardinality]
+        unaffected_columns_ = X.drop(columns=affected_columns_).columns.tolist()
+        return affected_columns_, unaffected_columns_
+    
+    def fit_transform(self, X_in: pd.DataFrame, y=None) -> pd.DataFrame:
+        X = X_in.copy()
+        self.fit(X, y)
+        X = X[self.affected_columns_]
+        Xt = pd.DataFrame(index=X_in.index)
+
+        for col in X.columns:
+            uniques = self.unique_values_per_col[col]
+
+            # Compute distances for each unique
+            diffs = np.diff(uniques)
+            left_dists = np.r_[np.inf, diffs]    # distance to previous
+            right_dists = np.r_[diffs, np.inf]   # distance to next
+            nearest = np.minimum(left_dists, right_dists)
+
+            # Map value → nearest distance
+            dist_map = dict(zip(uniques, nearest))
+
+            # Vectorized assignment
+            Xt[f"{col}_nn_dist"] = X_in[col].map(dist_map)
+
+        if self.keep_original:
+            return pd.concat([X_in[self.unaffected_columns_], X_in[self.affected_columns_], Xt], axis=1)
+        else:
+            return pd.concat([X_in[self.unaffected_columns_], Xt], axis=1)
