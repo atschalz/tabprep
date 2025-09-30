@@ -112,7 +112,7 @@ class NumericalInteractionDetector(BasePreprocessor):
             X_int[[f"{x.name}_+_{col2}" for col2 in cols_to_use]] = (pd.concat([x]*len(cols_to_use),axis=1) + X_num[cols_to_use].values).values
 
             # Filter weird cases
-            X_int = X_int.loc[:, X_int.nunique()>2] 
+            X_int = X_int.loc[:, X_int.nunique()>self.min_cardinality] 
 
             cors = X_int.corrwith(y, method='spearman').abs()
             final_cols = [cors[[interaction for interaction in cors.index if col in interaction]].idxmax() for col in cols_to_use]
@@ -149,7 +149,7 @@ class NumericalInteractionDetector(BasePreprocessor):
         X_int[[f"{x.name}_+_{col2}" for col2 in cols_to_use]] = (pd.concat([x]*len(cols_to_use),axis=1) + X_num[cols_to_use].values).values
 
         # Filter weird cases
-        X_int = X_int.loc[:, X_int.nunique()>2]
+        X_int = X_int.loc[:, X_int.nunique()>self.min_cardinality]
         
         corr_X_int = X_int.corrwith(y, method='spearman').abs().sort_values(ascending=False)
 
