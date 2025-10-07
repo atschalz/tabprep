@@ -128,6 +128,7 @@ class FastICAPreprocessor(SKLearnDecompositionPreprocessor):
             keep_original=keep_original,
             transformer_cls=FastICA,
             transformer_init_kwargs=dict(random_state=random_state),
+            **kwargs
             )
         self.new_col_prefix = 'ica'
 
@@ -140,7 +141,8 @@ class SVDPreprocessor(SKLearnDecompositionPreprocessor):
         super().__init__(
             keep_original=keep_original,
             transformer_cls=TruncatedSVD,
-            transformer_init_kwargs=dict(algorithm="arpack", random_state=random_state)
+            transformer_init_kwargs=dict(algorithm="arpack", random_state=random_state),
+            **kwargs
             )
         self.new_col_prefix = 'svd'
 
@@ -154,7 +156,8 @@ class PCAPreprocessor(SKLearnDecompositionPreprocessor):
         super().__init__(
             keep_original=keep_original,
             transformer_cls=PCA,
-            transformer_init_kwargs=dict(random_state=random_state)
+            transformer_init_kwargs=dict(random_state=random_state),
+            **kwargs
             )
         self.new_col_prefix = 'pca'
 
@@ -173,8 +176,9 @@ class KernelPCAPreprocessor(SKLearnDecompositionPreprocessor):
                 kernel=kernel,
                 random_state=random_state, 
                 n_jobs=-1,
-                **(kernel_kwargs if kernel_kwargs is not None else dict())
-            )
+                **(kernel_kwargs if kernel_kwargs is not None else dict()),
+            ),
+            **kwargs
         )
         self.new_col_prefix = f'{kernel}-PCA'
 
@@ -188,7 +192,8 @@ class SparsePCAPreprocessor(SKLearnDecompositionPreprocessor):
         super().__init__(
             keep_original=keep_original,
             transformer_cls=SparsePCA,
-            transformer_init_kwargs=dict(random_state=random_state, n_jobs=-1)
+            transformer_init_kwargs=dict(random_state=random_state, n_jobs=-1),
+            **kwargs
             )
         self.new_col_prefix = 'sparsepca'
 
@@ -197,11 +202,13 @@ class DictionaryLearningPreprocessor(SKLearnDecompositionPreprocessor):
     def __init__(self, 
                  keep_original: bool = True,
                  random_state: int = 42,
+                 **kwargs
                  ):
         super().__init__(
             keep_original=keep_original,
             transformer_cls=DictionaryLearning,
-            transformer_init_kwargs=dict(random_state=random_state, n_jobs=-1, transform_algorithm='lasso_lars')
+            transformer_init_kwargs=dict(random_state=random_state, n_jobs=-1, transform_algorithm='lasso_lars'),
+            **kwargs
             )
         self.new_col_prefix = 'dictlearn'
 
@@ -214,7 +221,8 @@ class FactorAnalysisPreprocessor(SKLearnDecompositionPreprocessor):
         super().__init__(
             keep_original=keep_original,
             transformer_cls=FactorAnalysis,
-            transformer_init_kwargs=dict(random_state=random_state)
+            transformer_init_kwargs=dict(random_state=random_state),
+            **kwargs
             )
         self.new_col_prefix = 'factoranalysis'
 
