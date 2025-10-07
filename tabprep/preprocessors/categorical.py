@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from tabprep.detectors.base_preprocessor import BasePreprocessor as old_base
 from category_encoders.leave_one_out import LeaveOneOutEncoder
+from sklearn.preprocessing import TargetEncoder
 from tabprep.preprocessors.frequency import FrequencyEncoder
 from autogluon.features.generators.drop_duplicates import DropDuplicatesFeatureGenerator
 from tabprep.utils.misc import sample_from_set
@@ -346,6 +347,55 @@ class CatLOOTransformer(CategoricalBasePreprocessor):
         X_out = self.loo_.transform(X_out)
         X_out.columns = [i + '_LOO' for i in X_out.columns]
 
+        return X_out
+    
+class TargetEncodingTransformer(CategoricalBasePreprocessor):
+    """
+    Transform all object/category columns using Leave-One-Out encoding.
+    Keeps non-categorical columns unchanged and returns a pandas DataFrame.
+
+    Parameters
+    ----------
+    sigma : float, default=0.0
+        Standard deviation of Gaussian noise added to encoding.
+    random_state : int, optional
+        Random seed for noise.
+    """
+    def __init__(self, 
+                 keep_original: bool = False,
+                 sigma: float = 0.0, 
+                 random_state: int | None = None,
+                 ):
+        super().__init__(keep_original=keep_original)
+        self.sigma = sigma
+        self.random_state = random_state
+
+    def _fit(self, X_in: pd.DataFrame, y_in: pd.Series):
+        X = X_in.copy()
+        y = y_in.copy()
+
+        if y is None:
+            raise ValueError("Leave-One-Out encoding requires a target variable `y`.")
+
+        # Fit Leave-One-Out encoder
+        self.loo_ = TargetEncoder(
+            # cols=list(X.columns),
+            # sigma=self.sigma,
+            # random_state=self.random_state
+        )
+
+        # TODO: Implement for multi-class
+        if y.nunique()==2:
+            self.loo_.fit(X, (y==y.iloc[0]).astype(float))
+        else:
+            self.loo_.fit(X, y.astype(float))
+
+        return self
+
+    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+        X_out = X_in.copy()
+        X_out = self.loo_.transform(X_out)
+        X_out = pd.DataFrame(X_out, index=X_in.index, columns=X_in.columns)
         return X_out
 
 
