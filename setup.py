@@ -2,8 +2,6 @@ from __future__ import annotations
 from setuptools import find_packages, setup
 
 requirements = [
-    "autogluon>=1.3",  # TODO: Remove after moving `benchmark` code elsewhere
-    "openml>=0.14.1",  # consider making optional
     "pyyaml",
     "pytest",
     "typing-extensions>=4.11,<5",  # used for `Self` type hint
