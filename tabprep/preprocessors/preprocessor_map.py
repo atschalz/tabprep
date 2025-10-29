@@ -1,0 +1,17 @@
+from tabprep.detectors.groupby_interactions import GroupByFeatureEngineer
+from tabprep.detectors.num_interaction import NumericalInteractionDetector
+from tabprep.preprocessors.frequency import FrequencyEncoder
+from tabprep.preprocessors.categorical import CatIntAdder, CatGroupByAdder, OneHotPreprocessor, CatLOOTransformer, DropCatTransformer
+from tabprep.preprocessors.numerical.scaling import SquashingScalerPreprocessor, KDITransformerPreprocessor, QuantileScalerPreprocessor, RobustScalerPreprocessor, StandardScalerPreprocessor
+from tabprep.preprocessors.numerical.one_to_many import SplinePreprocessor, NumericalOneHotPreprocessor, LowCardinalityOneHotPreprocessor
+from tabprep.preprocessors.numerical.one_to_one import TrigonometricTransformer, OptimalBinner, NearestNeighborDistanceTransformer
+from tabprep.preprocessors.multivariate import FastICAPreprocessor, SVDPreprocessor, PCAPreprocessor, KernelPCAPreprocessor, SparsePCAPreprocessor, DictionaryLearningPreprocessor, FactorAnalysisPreprocessor, LDAPreprocessor, NMFPreprocessor, DuplicateCountAdder, DuplicateSampleLOOEncoder, LinearFeatureAdder, RandomFourierFeatureTransformer, SklearnRandomFourierFeatureTransformer
+from tabprep.preprocessors.type_change import ToCategoricalTransformer, CatAsNumTransformer
+from tabprep.preprocessors.binary import BinarySumPreprocessor, BinaryJaccardGrouper
+from tabprep.preprocessors.numerical.arithmetic import ArithmeticBySpearmanPreprocessor, NumericalInteractionPreprocessor
+from tabprep.preprocessors.misc import GroupbyInteractionPreprocessor
+
+from typing import Dict, Any
+
+def get_preprocessor(prep_name):
+    return eval(prep_name)
