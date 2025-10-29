@@ -268,7 +268,9 @@ class DuplicateCountAdder(NumericBasePreprocessor):
     def __init__(
             self, 
             feature_name: str = "duplicate_count", 
-            cap: bool = False):
+            cap: bool = False,
+            **kwargs
+            ):
         super().__init__(keep_original=True)
         self.feature_name = feature_name
         self.cap = cap
@@ -335,7 +337,8 @@ class DuplicateCountAdder(NumericBasePreprocessor):
 
 class DuplicateSampleLOOEncoder(BasePreprocessor):
     def __init__(
-        self, new_name='LOO_duplicates'
+        self, new_name='LOO_duplicates',
+        **kwargs
     ):
         super().__init__(keep_original=True)
         self.new_col = new_name
@@ -403,7 +406,8 @@ class LinearFeatureAdder(BaseEstimator, TransformerMixin):
         rare_token: str = "__OTHER__",
         categorical_cols: Optional[List[str]] = None,
         append_encoded: bool = False,
-        random_state: Optional[int] = 42
+        random_state: Optional[int] = 42,
+        **kwargs
     ):
         self.target_type = target_type
         self.linear_model_type = linear_model_type
@@ -508,7 +512,7 @@ class LinearFeatureAdder(BaseEstimator, TransformerMixin):
                 c: self._rare_map(X[c].astype("object"), self.cat_specs_[c])
                 for c in self.cat_cols_
             }, index=idx)
-            enc = self.ohe_.transform(mapped)
+            enc = self.ohe_.transform(mapped.astype(str))
             ohe_df = pd.DataFrame(enc, index=idx, columns=self.ohe_feature_names_) if enc.size else pd.DataFrame(index=idx)
         else:
             ohe_df = pd.DataFrame(index=idx)
@@ -543,7 +547,7 @@ class LinearFeatureAdder(BaseEstimator, TransformerMixin):
                 c: self._rare_map(X[c].astype("object"), self.cat_specs_[c])
                 for c in self.cat_cols_
             }, index=idx)
-            enc = self.ohe_.transform(mapped)
+            enc = self.ohe_.transform(mapped.astype(str))
             ohe_df = pd.DataFrame(enc, index=idx, columns=self.ohe_feature_names_) if enc.size else pd.DataFrame(index=idx)
         else:
             ohe_df = pd.DataFrame(index=idx)
@@ -584,7 +588,7 @@ class LinearFeatureAdder(BaseEstimator, TransformerMixin):
                 c: self._rare_map(pd.Series(X[c]).astype("object"), self.cat_specs_[c])
                 for c in self.cat_cols_
             }, index=X.index)
-            self.ohe_ = self._make_ohe().fit(mapped)
+            self.ohe_ = self._make_ohe().fit(mapped.astype(str))
             self.ohe_feature_names_ = self.ohe_.get_feature_names_out(self.cat_cols_).tolist()
         else:
             self.ohe_ = None
@@ -659,7 +663,7 @@ class LinearFeatureAdder(BaseEstimator, TransformerMixin):
 import numpy as np
 
 class RandomFourierFeatureTransformer(NumericBasePreprocessor):
-    def __init__(self, n_features=100, gamma=1.0, random_state=None):
+    def __init__(self, n_features=100, gamma=1.0, random_state=None, **kwargs):
         """
         n_features: number of Fourier features to generate
         gamma: RBF kernel parameter (1 / (2 * sigma^2))
@@ -689,7 +693,7 @@ class RandomFourierFeatureTransformer(NumericBasePreprocessor):
         return X_out
 
 class SklearnRandomFourierFeatureTransformer(NumericBasePreprocessor):
-    def __init__(self, n_features=100, gamma=1.0, random_state=None):
+    def __init__(self, n_features=100, gamma=1.0, random_state=None, **kwargs):
         """
         n_features: number of Fourier features to generate
         gamma: RBF kernel parameter (1 / (2 * sigma^2))

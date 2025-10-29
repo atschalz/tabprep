@@ -9,7 +9,7 @@ from tabprep.proxy_models import (
 )
 
 class TargetRepresenter(BasePreprocessor):
-    def __init__(self, feature_target_rep, target_type):
+    def __init__(self, feature_target_rep, target_type, **kwargs):
         super().__init__(keep_original=False)
         self.feature_target_rep = feature_target_rep.copy()
         self.target_type = target_type
@@ -94,3 +94,9 @@ class TargetRepresenter(BasePreprocessor):
         
         X = X.drop(columns=self.drop_cols, errors='ignore')
         return X
+    
+from tabprep.detectors.groupby_interactions import GroupByFeatureEngineer
+class GroupbyInteractionPreprocessor(GroupByFeatureEngineer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        del self.cv_func, self.adjust_target_format

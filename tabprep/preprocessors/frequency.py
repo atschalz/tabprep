@@ -7,6 +7,7 @@ class FrequencyEncoder(BasePreprocessor):
                  only_categorical: bool = True,
                  candidate_cols: list = None, 
                  use_filters: bool = True,
+                 **kwargs
                  ):
         super().__init__(keep_original=keep_original)
         self.only_categorical = only_categorical

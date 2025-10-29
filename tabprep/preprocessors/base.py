@@ -4,7 +4,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
 class BasePreprocessor(BaseEstimator, TransformerMixin):
-    def __init__(self, keep_original=False): # TODO: Decide what to use as default
+    def __init__(self, keep_original=False, **kwargs): # TODO: Decide what to use as default
         """
         Parameters
         ----------
@@ -59,13 +59,13 @@ class BasePreprocessor(BaseEstimator, TransformerMixin):
 
 # TODO: If nothing else changes with these BasePreprocessors, move the _get_affected_columns to Base and delete them
 class NumericBasePreprocessor(BasePreprocessor):
-    def _get_affected_columns(self, X: pd.DataFrame):
+    def _get_affected_columns(self, X: pd.DataFrame, **kwargs):
         affected_columns_ = X.select_dtypes(include=['number']).columns.tolist()
         unaffected_columns_ = X.drop(columns=affected_columns_).columns.tolist()
         return affected_columns_, unaffected_columns_
 
 class CategoricalBasePreprocessor(BasePreprocessor):
-    def _get_affected_columns(self, X: pd.DataFrame):
+    def _get_affected_columns(self, X: pd.DataFrame, **kwargs):
         affected_columns_ = X.select_dtypes(include=['category', 'object']).columns.tolist()
         unaffected_columns_ = X.drop(columns=affected_columns_).columns.tolist()
         return affected_columns_, unaffected_columns_

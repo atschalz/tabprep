@@ -11,7 +11,7 @@ class BaseBinaryTransformer(BasePreprocessor):
     A base class for binary transformers.
     """
     def __init__(self, 
-                 keep_original: bool = False, 
+                 keep_original: bool = False, **kwargs
                  ):
         super().__init__(keep_original=keep_original)
 
@@ -19,13 +19,12 @@ class BaseBinaryTransformer(BasePreprocessor):
         affected_columns_ = X.columns[X.nunique() == 2].tolist()
         unaffected_columns_ = X.drop(columns=affected_columns_).columns.tolist()
         return affected_columns_, unaffected_columns_
-    
 
 class BinaryToNumericTransformer(BaseBinaryTransformer):
     """
     A base class for binary transformers.
     """
-    def __init__(self):
+    def __init__(self, **kwargs):
         super().__init__(keep_original=False)
 
     def _fit(self, X_in: pd.DataFrame, y_in: pd.Series = None):
@@ -48,7 +47,8 @@ class BinarySumPreprocessor(BaseBinaryTransformer):
     """
     def __init__(self, 
                  keep_original: bool = False, 
-                 new_column_name: str = 'binary_sum'
+                 new_column_name: str = 'binary_sum',
+                 **kwargs
                  ):
         super().__init__(keep_original=keep_original)
         self.new_column_name = new_column_name
@@ -78,7 +78,8 @@ class BinarySumByTargetDirectionPreprocessor(BaseBinaryTransformer):
     # TODO: Make it subclass the binary_sum preprocessor
     def __init__(self, 
                  target_type: Literal['binary', 'multiclass', 'regression'] = 'binary',
-                 new_column_name: str = 'binary_sum_by_target'
+                 new_column_name: str = 'binary_sum_by_target',
+                 **kwargs
                  ):
         super().__init__(keep_original=True)
         self.new_column_name = new_column_name
@@ -118,7 +119,7 @@ from scipy.spatial.distance import pdist, squareform
 from scipy.cluster.hierarchy import linkage, fcluster
 from tabprep.utils.misc import cat_as_num
 class BinaryJaccardGrouper(BaseBinaryTransformer):
-    def __init__(self, n_clusters=None, threshold=0.3):
+    def __init__(self, n_clusters=None, threshold=0.3, **kwargs):
         """
         n_clusters : int, optional
             Force a fixed number of groups. If None, use threshold.

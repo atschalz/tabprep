@@ -11,6 +11,7 @@ from typing import Literal
 class StandardScalerPreprocessor(NumericBasePreprocessor):
     def __init__(self, 
                  keep_original: bool = False,
+                 **kwargs
                 #  scaler_kwargs: dict = dict(),
                  ):
         super().__init__(keep_original=keep_original)
@@ -32,6 +33,7 @@ class StandardScalerPreprocessor(NumericBasePreprocessor):
 class RobustScalerPreprocessor(NumericBasePreprocessor):
     def __init__(self, 
                  keep_original: bool = False,
+                 **kwargs
                 #  scaler_kwargs: dict = dict(),
                  ):
         super().__init__(keep_original=keep_original)
@@ -54,6 +56,7 @@ class QuantileScalerPreprocessor(NumericBasePreprocessor):
     def __init__(self, 
                  keep_original: bool = False,
                  scaler_kwargs: dict = dict(random_state=42, n_quantiles=1000, output_distribution='uniform'),
+                 **kwargs
                  ):
         super().__init__(keep_original=keep_original)
         self.scaler = QuantileTransformer(**scaler_kwargs)
@@ -72,7 +75,7 @@ class QuantileScalerPreprocessor(NumericBasePreprocessor):
             return pd.DataFrame()
 
 class SquashingScalerPreprocessor(NumericBasePreprocessor):
-    def __init__(self, keep_original: bool = False):
+    def __init__(self, keep_original: bool = False, **kwargs):
         super().__init__(keep_original=keep_original)
         self.scaler = SquashingScaler()
 
@@ -96,7 +99,8 @@ class KDITransformerPreprocessor(NumericBasePreprocessor):
                  keep_original: bool = False, 
                  alpha: float = 1.0,
                  output_distribution: Literal["uniform", "normal"] = "uniform",
-                 fillna: Literal['mean', 'median'] = 'mean'
+                 fillna: Literal['mean', 'median'] = 'mean',
+                 **kwargs
                  ):
         super().__init__(keep_original=keep_original)
         self.scaler = KDITransformer(alpha=alpha, output_distribution=output_distribution)

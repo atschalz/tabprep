@@ -18,6 +18,7 @@ class SplinePreprocessor(NumericBasePreprocessor):
                     #  knots = 'uniform',
                     #  extrapolation = 'constant',
                      ),
+                **kwargs
                  ):
         super().__init__(keep_original=keep_original)
         self.transformer = SplineTransformer(include_bias=False, **transformer_kwargs)
@@ -76,7 +77,8 @@ class NumericalOneHotPreprocessor(NumericBasePreprocessor):
             self, 
             keep_original: bool = False,
             drop: Literal['if_binary', 'first'] = 'if_binary',
-            min_frequency: int = 20
+            min_frequency: int = 20,
+            **kwargs
             ):
         super().__init__(keep_original=keep_original)
         self.drop = drop

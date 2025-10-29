@@ -14,7 +14,8 @@ class ToCategoricalTransformer(BasePreprocessor):
             self, 
             keep_original: bool = False, 
             only_numerical: bool = False,
-            min_cardinality: int = 6
+            min_cardinality: int = 6,
+            **kwargs
             ):
         # TODO: Add min_frequency to only transform categories with a minimum frequency
         super().__init__(keep_original=keep_original)
@@ -33,14 +34,15 @@ class ToCategoricalTransformer(BasePreprocessor):
         return self
 
     def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
-        X_out = X_in.copy()
+        X = X_in.copy()
+        X_out = pd.DataFrame(index=X.index)
 
         for col in self.categories_:
             if col not in self.categories_:
                 raise ValueError(f"Column '{col}' was not seen during fit.")
 
             cat_col = pd.Categorical(
-                X_out[col],
+                X[col],
                 categories=self.categories_[col]
             )
 
@@ -80,6 +82,7 @@ class CatAsNumTransformer(CategoricalBasePreprocessor):
         handle_unknown: str = "use_encoded_value",
         unknown_value: float | int = -1,
         dtype=np.float64,
+        **kwargs
     ):
         super().__init__(keep_original=keep_original)
         self.handle_unknown = handle_unknown

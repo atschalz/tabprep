@@ -28,6 +28,7 @@ class CatIntAdder(old_base):
                  add_freq=False, 
                  only_freq=False,
                  min_cardinality=6,
+                 **kwargs
                  ):
         super().__init__(target_type=target_type)
 
@@ -41,6 +42,8 @@ class CatIntAdder(old_base):
         self.min_cardinality = min_cardinality
 
         self.new_dtypes = {}
+
+        del self.cv_func, self.adjust_target_format # NOTE: Necessary to store AG models with pickle
 
     def combine(self, X_in, order=2, num_operations='all', seed=42, **kwargs):
         # TODO: Implement as matrix operations to speed up the process
@@ -132,14 +135,14 @@ class CatIntAdder(old_base):
             cat_freq = FrequencyEncoder()
             candidate_cols = cat_freq.filter_candidates_by_distinctiveness(X_new[self.new_col_set])
             if len(candidate_cols) > 0:
-                self.cat_freq = FrequencyEncoder(candidate_cols=candidate_cols).fit(X_new, y)        
+                self.cat_freq = FrequencyEncoder(candidate_cols=candidate_cols).fit(X_new[candidate_cols], y)        
 
         return self
     
     def transform(self, X_in):
         X = X_in.copy()
 
-        X_out = X.copy()
+        X_out = pd.DataFrame(index=X.index)
         if len(self.new_col_set) > 0:
             for degree in range(2, self.max_order+1):
                 col_set_use = [col for col in self.new_col_set if col.count('_&_')+1 == degree]
@@ -150,18 +153,22 @@ class CatIntAdder(old_base):
                     X_out = pd.concat([X_out, X_degree], axis=1)
                     
             if self.add_freq or self.only_freq:
-                X_out = pd.concat([X_out, self.cat_freq.transform(X_out)], axis=1)
+                X_out = self.cat_freq.transform(X_out)
             if self.only_freq:
                 X_out = X_out.drop(self.new_col_set, axis=1, errors='ignore')
-
+        X_out = pd.concat([X, X_out], axis=1)
         return X_out
+
+# class Cat
 
 # TODO: Adjust to new preprocessinbg logic
 class CatGroupByAdder(BaseEstimator, TransformerMixin):
     def __init__(self, 
         candidate_cols=None,
         max_order = 2, num_operations='all', fillna=0,
-       min_cardinality=6):
+       min_cardinality=6,
+       **kwargs
+       ):
         self.candidate_cols = candidate_cols
         self.max_order = max_order
         self.num_operations = num_operations
@@ -252,7 +259,7 @@ class CatGroupByAdder(BaseEstimator, TransformerMixin):
     def transform(self, X_in):
         X = X_in.copy()
 
-        X_out = X.copy()
+        X_out = X.copy() # pd.DataFrame(index=X.index)
         for degree in range(2, self.max_order+1):
             col_set_use = [col for col in self.new_col_set if col.count('_by_')+1 == degree]
             if len(col_set_use) > 0:
@@ -272,7 +279,10 @@ class OneHotPreprocessor(CategoricalBasePreprocessor):
         self, 
         keep_original: bool = False, 
         drop: Literal['if_binary', 'first'] = 'if_binary', 
-        min_frequency: int = 1):
+        min_frequency: int = 1,
+        **kwargs
+
+        ):
         super().__init__(keep_original=keep_original)
         self.drop = drop
         self.min_frequency = min_frequency
@@ -314,6 +324,7 @@ class CatLOOTransformer(CategoricalBasePreprocessor):
                  keep_original: bool = False,
                  sigma: float = 0.0, 
                  random_state: int | None = None,
+                 **kwargs
                  ):
         super().__init__(keep_original=keep_original)
         self.sigma = sigma
@@ -334,6 +345,12 @@ class CatLOOTransformer(CategoricalBasePreprocessor):
             random_state=self.random_state
         )
 
+        self.modes = X.mode().iloc[0]
+
+        for col in X.columns:
+            if X[col].isna().sum()>0:
+                X[col] = X[col].fillna(self.modes[col])
+
         # TODO: Implement for multi-class
         if y.nunique()==2:
             self.loo_.fit(X, (y==y.iloc[0]).astype(float))
@@ -344,6 +361,9 @@ class CatLOOTransformer(CategoricalBasePreprocessor):
 
     def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
         X_out = X_in.copy()
+        for col in X_out.columns:
+            if X_out[col].isna().sum()>0:
+                X_out[col] = X_out[col].fillna(self.modes[col])
         X_out = self.loo_.transform(X_out)
         X_out.columns = [i + '_LOO' for i in X_out.columns]
 
@@ -365,6 +385,8 @@ class TargetEncodingTransformer(CategoricalBasePreprocessor):
                  keep_original: bool = False,
                  sigma: float = 0.0, 
                  random_state: int | None = None,
+                 **kwargs
+
                  ):
         super().__init__(keep_original=keep_original)
         self.sigma = sigma
@@ -400,7 +422,7 @@ class TargetEncodingTransformer(CategoricalBasePreprocessor):
 
 
 class DropCatTransformer(CategoricalBasePreprocessor):
-    def __init__(self):
+    def __init__(self, **kwargs):
         super().__init__(keep_original=False)
         self.drop_cols = []
 

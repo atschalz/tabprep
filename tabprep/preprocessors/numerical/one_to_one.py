@@ -18,7 +18,8 @@ class TrigonometricTransformer(NumericBasePreprocessor):
     def __init__(
         self, 
         keep_original: bool = True, 
-        operations: List[Literal['sin', 'cos', 'tan', 'sincos']] = ['sin', 'cos', 'tan', 'sincos']
+        operations: List[Literal['sin', 'cos', 'tan', 'sincos']] = ['sin', 'cos', 'tan', 'sincos'],
+        **kwargs
     ):
         super().__init__(keep_original=keep_original)
         self.operations = operations
@@ -47,6 +48,7 @@ class OptimalBinner(NumericBasePreprocessor):
                  candidate_bins=(2, 4, 8, 16, 32, 64, 128, 256, 512,1024,2048),
                  strategy="uniform",
                  encode="ordinal",
+                 **kwargs
                  ):
         """
         Parameters
@@ -139,7 +141,7 @@ class OptimalBinner(NumericBasePreprocessor):
 
 
 class NearestNeighborDistanceTransformer(NumericBasePreprocessor):
-    def __init__(self, keep_original=True, min_cardinality=6):
+    def __init__(self, keep_original=True, min_cardinality=6, **kwargs):
         super().__init__(keep_original=keep_original)
         self.min_cardinality = min_cardinality
         

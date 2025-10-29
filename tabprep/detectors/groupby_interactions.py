@@ -252,7 +252,7 @@ class GroupByFeatureEngineer(BasePreprocessor):
         X = X_in.copy()
         y = y_in.copy()
 
-        y = self.adjust_target_format(y)
+        # y = self.adjust_target_format(y)
 
         X_cat = X.loc[:,(X.nunique()>=self.min_cardinality).values].select_dtypes(include=['category', 'object'])#.astype('U') #TODO: Check whether astype assignment at this point is best
         X_num = X.loc[:,(X.nunique()>=self.min_cardinality).values].select_dtypes(exclude=['category', 'object'])

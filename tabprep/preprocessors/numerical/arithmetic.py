@@ -11,7 +11,7 @@ from scipy.stats import rankdata
 import itertools
 
 class ArithmeticBySpearmanPreprocessor(NumericBasePreprocessor):
-    def __init__(self, operations=None, correlation_threshold=0.05, max_depth=2, top_k=None, base_k=20, target_type="auto"):
+    def __init__(self, operations=None, correlation_threshold=0.05, max_depth=2, top_k=None, base_k=20, target_type="auto", **kwargs):
         """
         operations: list of arithmetic operations to apply ["add", "sub", "mul", "div"]
         correlation_threshold: minimum improvement in Spearman correlation required to keep a new feature
@@ -175,3 +175,11 @@ class ArithmeticBySpearmanPreprocessor(NumericBasePreprocessor):
             X_out[name] = feature_cache[name]
 
         return X_out
+
+
+from tabprep.detectors.num_interaction import NumericalInteractionDetector
+
+class NumericalInteractionPreprocessor(NumericalInteractionDetector):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        del self.cv_func, self.adjust_target_format
