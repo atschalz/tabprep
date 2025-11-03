@@ -10,6 +10,7 @@ from tabprep.preprocessors.type_change import ToCategoricalTransformer, CatAsNum
 from tabprep.preprocessors.binary import BinarySumPreprocessor, BinaryJaccardGrouper
 from tabprep.preprocessors.numerical.arithmetic import ArithmeticBySpearmanPreprocessor, NumericalInteractionPreprocessor
 from tabprep.preprocessors.misc import GroupbyInteractionPreprocessor
+from tabprep.preprocessors.arithmetic.preprocessor import ArithmeticPreprocessor
 
 from typing import Dict, Any
 
