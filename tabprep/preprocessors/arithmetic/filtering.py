@@ -26,7 +26,6 @@ def remove_constant_features_pl(X):
 def basic_filter(
         X_in: pd.DataFrame, 
         # y_in: pd.Series,
-        cat_as_num: bool = False,
         min_cardinality: int = 3,
         candidate_cols: list = None,
         use_polars: bool = False

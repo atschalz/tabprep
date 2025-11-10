@@ -24,11 +24,11 @@ class BasePreprocessor(BaseEstimator, TransformerMixin):
 
         return self
 
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+    def transform(self, X: pd.DataFrame, is_train=False) -> pd.DataFrame:
         if len(self.affected_columns_) == 0:
             return X.copy()
         
-        Xt = self._transform(X[self.affected_columns_])
+        Xt = self._transform(X[self.affected_columns_], is_train=is_train)
         # NOTE: if self.keep_original, the new names must be distinct and in 1-to-many the subclass must implement logic for appropriate naming itself
 
         if self.keep_original:
@@ -42,7 +42,7 @@ class BasePreprocessor(BaseEstimator, TransformerMixin):
 
     def fit_transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
         self.fit(X, y)
-        return self.transform(X)
+        return self.transform(X, is_train=True)
 
     # ---- To be implemented by subclasses ----
     def _get_affected_columns(self, X: pd.DataFrame):
@@ -53,7 +53,7 @@ class BasePreprocessor(BaseEstimator, TransformerMixin):
         """Subclasses implement actual transformation."""
         pass
 
-    def _transform(self, X: pd.DataFrame) -> pd.DataFrame:
+    def _transform(self, X: pd.DataFrame, is_train=False) -> pd.DataFrame:
         """Subclasses implement actual transformation."""
         return X
 

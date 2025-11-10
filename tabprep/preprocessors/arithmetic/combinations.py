@@ -7,7 +7,7 @@ def get_all_bivariate_interactions(
     X_num, 
     order=2, 
     max_base_interactions=10000,
-    interaction_types=['/', 'x', '-', '+'] # TODO: make inverse_div an own op
+    interaction_types=['/', '*', '-', '+'] # TODO: make inverse_div an own op
 ):
     cols = X_num.columns.to_numpy()
     combs = np.array(list(combinations(cols, order)))
@@ -37,8 +37,8 @@ def get_all_bivariate_interactions(
             df1 = pd.DataFrame(div1, columns=[f"{a}_/_{b}" for a, b in zip(feat0, feat1)])
             df2 = pd.DataFrame(div2, columns=[f"{b}_/_{a}" for a, b in zip(feat0, feat1)])
             results.extend([df1, df2])
-        elif op == 'x':
-            df = pd.DataFrame(A * B, columns=[f"{a}_x_{b}" for a, b in zip(feat0, feat1)])
+        elif op == '*':
+            df = pd.DataFrame(A * B, columns=[f"{a}_*_{b}" for a, b in zip(feat0, feat1)])
             results.append(df)
         elif op == '-':
             df = pd.DataFrame(A - B, columns=[f"{a}_-_{b}" for a, b in zip(feat0, feat1)])
@@ -55,21 +55,19 @@ def get_n_possible_interactions(n, order=2):
     return comb(n, order)
 
 def add_higher_interaction(
-        X_base_in, 
-        X_interact_in, 
+        X_base, 
+        X_interact, 
         max_base_interactions=10000,
-        interaction_types=['/', 'x', '-', '+'],
+        interaction_types=['/', '*', '-', '+'], # FIXME: Might need to fix bug if one of these operators occurs in feature names
     ):
-    X_base = X_base_in
-    X_interact = X_interact_in
-
     # Generate valid column pairs (avoid j inside i for safety)
     all_pairs = [
         (i, j) for i, j in product(X_interact.columns, X_base.columns)
         if j not in i
     ]
-    # np.random.shuffle(all_pairs)
-    all_pairs = np.array(all_pairs[:max_base_interactions])
+    all_pairs = np.array(all_pairs)
+    if len(all_pairs) > max_base_interactions:
+        all_pairs = all_pairs[np.random.choice(len(all_pairs), max_base_interactions, replace=False)]
     feat0, feat1 = all_pairs.T
 
     # Convert to numpy arrays once for speed
@@ -89,7 +87,7 @@ def add_higher_interaction(
             new_data.update(dict(zip(names1, res1.T)))
             new_data.update(dict(zip(names2, res2.T)))
 
-        elif i_type == 'x':
+        elif i_type == '*':
             # Multiplication is commutative → skip duplicate (a×b == b×a)
             seen_pairs = set()
             res_list, name_list = [], []
@@ -108,7 +106,7 @@ def add_higher_interaction(
             seen_pairs = set()
             res_list, name_list = [], []
             for a, b in zip(feat0, feat1):
-                if tuple(sorted((a, b))) in seen_pairs:
+                if tuple(sorted((a, b))) in seen_pairs: # FIXME: a can already consist of multiple features
                     continue
                 seen_pairs.add(tuple(sorted((a, b))))
                 res_list.append((X_interact[a].values + X_base[b].values).astype(float))
@@ -124,7 +122,7 @@ def add_higher_interaction(
             new_data.update(dict(zip(names, res.T)))
 
         else:
-            raise ValueError(f"Unknown interaction type: {i_type}. Use '/', 'x', '-', or '+'.")
+            raise ValueError(f"Unknown interaction type: {i_type}. Use '/', '*', '-', or '+'.")
 
     # Build the new DataFrame once (fast)
     X_int_new = pd.DataFrame(new_data, index=X_interact.index)

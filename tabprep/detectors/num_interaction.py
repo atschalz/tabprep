@@ -26,7 +26,7 @@ class NumericalInteractionDetector(BasePreprocessor):
                 use_mvp=True,
                 corr_thresh = 0.95,
                 select_n_candidates=None,
-                max_filter=5000,
+                max_filter=5000, filter_seed=42,
                  execution_mode='independent', # ['independent', 'reduce', 'expand']
                  max_order=2, num_operations='all',
                  scores: dict = None, cv_func=None,
@@ -43,6 +43,7 @@ class NumericalInteractionDetector(BasePreprocessor):
         self.corr_thresh = corr_thresh
         self.select_n_candidates = select_n_candidates
         self.max_filter = max_filter
+        self.filter_rng = np.random.default_rng(filter_seed)
         self.execution_mode = execution_mode
         self.max_order = max_order
         self.num_operations = num_operations
@@ -303,7 +304,7 @@ class NumericalInteractionDetector(BasePreprocessor):
         X = X_num.copy()
         X_int = X_num.copy()
         all_new_cols = np.array(list(combinations(X.columns,order)))
-        np.random.shuffle(all_new_cols)
+        self.filter_rng.shuffle(all_new_cols)
         feat0,feat1 = all_new_cols[:max_base_interactions].transpose()
         
         new_col_names = []
@@ -319,6 +320,9 @@ class NumericalInteractionDetector(BasePreprocessor):
                 X_div = pd.DataFrame((X_num[feat0].values / X_num[feat1].replace(0, np.nan).values).astype(float))
                 X_div.columns = [f"{col1}_{i_type}_{col2}" for col1, col2 in zip(feat0, feat1)]
                 new_cols.append(X_div)
+                X_div_2 = pd.DataFrame((X_num[feat1].values / X_num[feat0].replace(0, np.nan).values).astype(float))
+                X_div_2.columns = [f"{col1}_{i_type}_{col2}" for col1, col2 in zip(feat1, feat0)]
+                new_cols.append(X_div_2)
             elif i_type == 'x':
                 X_mult = pd.DataFrame((X_num[feat0].values * X_num[feat1].values).astype(float))
                 X_mult.columns = [f"{col1}_{i_type}_{col2}" for col1, col2 in zip(feat0, feat1)]
@@ -341,7 +345,7 @@ class NumericalInteractionDetector(BasePreprocessor):
         X_base = X_base_in.copy()
         X_interact = X_interact_in.copy()
         all_new_cols = np.array([[i, j] for i,j in product(X_interact.columns, X_base.columns) if j not in i])
-        np.random.shuffle(all_new_cols)
+        self.filter_rng.shuffle(all_new_cols)
         feat0,feat1 = all_new_cols[:max_base_interactions].transpose()
         
         new_col_names = []
@@ -482,7 +486,7 @@ class NumericalInteractionDetector(BasePreprocessor):
         cand_cols = list(set(X_int.columns) - set(X_num.columns))
 
         if len(cand_cols) > self.max_filter:
-            X_int = X_int.sample(n=self.max_filter, random_state=42, replace=False, axis=1)
+            X_int = X_int.sample(n=self.max_filter, random_state=self.filter_rng, replace=False, axis=1)
 
         # if self.apply_filters:
         # Filter constant features
@@ -490,13 +494,12 @@ class NumericalInteractionDetector(BasePreprocessor):
         cand_cols = X_int.columns.tolist()
 
         # Filter features for which the range is too similar to the base features
-        if self.select_n_candidates is not None:
-            X_abs_corr = X_int.apply(lambda x: self.remove_same_range_features(X_num, x)).abs()
-            cand_cols = X_abs_corr.sort_values().index[:self.select_n_candidates]
-            X_int = X_int[cand_cols]
-        elif self.corr_thresh<1:
-            X_abs_corr = X_int.apply(lambda x: self.remove_same_range_features(X_num, x)).abs()
+        X_abs_corr = X_int.apply(lambda x: self.remove_same_range_features(X_num, x)).abs()
+        if self.corr_thresh<1:
             cand_cols = X_int.columns[X_abs_corr < self.corr_thresh]
+            X_int = X_int[cand_cols]
+        if self.select_n_candidates is not None:
+            cand_cols = X_abs_corr[cand_cols].sort_values().index[:self.select_n_candidates]
             X_int = X_int[cand_cols]
 
         if self.use_mvp:
@@ -507,9 +510,10 @@ class NumericalInteractionDetector(BasePreprocessor):
         # Keep one candidate per interaction based on y corr
         # base_corrs = X_num.corrwith(y).abs().sort_values(ascending=False)
         # int_corrs = X_int.corrwith(y).abs().sort_values(ascending=False)
-        # X_int = X_int[int_corrs.index[int_corrs>0.1]]        
-        
-        self.new_cols = X_int.columns.tolist()
+        # X_int = X_int[int_corrs.index[int_corrs>0.1]]
+
+        # FIXME: Make sure that np.unique is not necessary and handled in previous filtering steps
+        self.new_cols = np.unique(X_int.columns).tolist()
 
         # if len(X_num.columns) == 0:
         #     raise ValueError("No numerical columns found in the dataset.")

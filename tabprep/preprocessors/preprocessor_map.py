@@ -1,7 +1,7 @@
 from tabprep.detectors.groupby_interactions import GroupByFeatureEngineer
 from tabprep.detectors.num_interaction import NumericalInteractionDetector
 from tabprep.preprocessors.frequency import FrequencyEncoder
-from tabprep.preprocessors.categorical import CatIntAdder, CatGroupByAdder, OneHotPreprocessor, CatLOOTransformer, DropCatTransformer
+from tabprep.preprocessors.categorical import CatIntAdder, CatGroupByAdder, OneHotPreprocessor, CatLOOTransformer, DropCatTransformer, OOFTargetEncoder
 from tabprep.preprocessors.numerical.scaling import SquashingScalerPreprocessor, KDITransformerPreprocessor, QuantileScalerPreprocessor, RobustScalerPreprocessor, StandardScalerPreprocessor
 from tabprep.preprocessors.numerical.one_to_many import SplinePreprocessor, NumericalOneHotPreprocessor, LowCardinalityOneHotPreprocessor
 from tabprep.preprocessors.numerical.one_to_one import TrigonometricTransformer, OptimalBinner, NearestNeighborDistanceTransformer
@@ -11,6 +11,9 @@ from tabprep.preprocessors.binary import BinarySumPreprocessor, BinaryJaccardGro
 from tabprep.preprocessors.numerical.arithmetic import ArithmeticBySpearmanPreprocessor, NumericalInteractionPreprocessor
 from tabprep.preprocessors.misc import GroupbyInteractionPreprocessor
 from tabprep.preprocessors.arithmetic.preprocessor import ArithmeticPreprocessor
+from tabprep.preprocessors.expert import ExpertPreprocessor
+from tabprep.preprocessors.out_of_fold import OOFKNNTargetMeanEncoder
+
 
 from typing import Dict, Any
 
