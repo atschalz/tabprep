@@ -24,7 +24,7 @@ class TrigonometricTransformer(NumericBasePreprocessor):
         super().__init__(keep_original=keep_original)
         self.operations = operations
 
-    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+    def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
         X = X_in.copy()
         X_transformed = pd.DataFrame(index=X.index)
         # FIXME: Can simply apply operations on whole DataFrame
@@ -130,7 +130,7 @@ class OptimalBinner(NumericBasePreprocessor):
         
         return self
     
-    def _transform(self, X_in):
+    def _transform(self, X_in, **kwargs):
         X_out = X_in.copy()
         
         for col, binner in self.col_binners_.items():
@@ -152,7 +152,7 @@ class NearestNeighborDistanceTransformer(NumericBasePreprocessor):
         }
         return self
     
-    def _transform(self, X_in):
+    def _transform(self, X_in, **kwargs):
         X_out = pd.DataFrame(index=X_in.index)
         for col in X_in.columns:
             if col not in self.unique_values_per_col:

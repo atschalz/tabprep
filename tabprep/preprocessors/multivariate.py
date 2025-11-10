@@ -66,7 +66,7 @@ class SKLearnDecompositionPreprocessor(BasePreprocessor):
         self.transformer.fit(X)
         return self
         
-    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+    def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
         # TODO: nan logic reappers, consider general class
         X = X_in.copy()
         if len(self.affected_columns_) > 0:
@@ -305,7 +305,7 @@ class DuplicateCountAdder(NumericBasePreprocessor):
         self.counts_ = Counter(rows)
         return self
 
-    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+    def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
         """
         Append the duplicate‐count feature to X.
         
@@ -358,7 +358,7 @@ class DuplicateSampleLOOEncoder(BasePreprocessor):
 
         return self
 
-    def _transform(self, X):
+    def _transform(self, X, **kwargs):
         X_out = X.copy()
         X_str = X.astype(str).sum(axis=1)
         X_uid = pd.DataFrame(X_str.map(self.u_id_map).astype(str))
@@ -607,7 +607,7 @@ class LinearFeatureAdder(BaseEstimator, TransformerMixin):
 
         return self
 
-    def transform(self, X):
+    def transform(self, X, **kwargs):
         X = self._ensure_df(X)
 
         X_enc = self._encode_unseen(X)
@@ -685,7 +685,7 @@ class RandomFourierFeatureTransformer(NumericBasePreprocessor):
         self.b = self.random_state.uniform(0, 2*np.pi, size=self.n_features)
         return self
     
-    def _transform(self, X_in):
+    def _transform(self, X_in, **kwargs):
         X = X_in.copy()
         projection = X @ self.W + self.b
         X_out = np.sqrt(2.0 / self.n_features) * np.cos(projection)
@@ -710,7 +710,7 @@ class SklearnRandomFourierFeatureTransformer(NumericBasePreprocessor):
         self.rff_.fit(X.fillna(0))
         return self
     
-    def _transform(self, X_in):
+    def _transform(self, X_in, **kwargs):
         X = X_in.copy()
         X_out = pd.DataFrame(self.rff_.transform(X.fillna(0)), index=X.index)
         X_out.columns = [f'rff_{i}' for i in range(self.n_features)]

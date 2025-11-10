@@ -33,7 +33,7 @@ class ToCategoricalTransformer(BasePreprocessor):
         }
         return self
 
-    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+    def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
         X = X_in.copy()
         X_out = pd.DataFrame(index=X.index)
 
@@ -120,7 +120,7 @@ class CatAsNumTransformer(CategoricalBasePreprocessor):
 
         return self
 
-    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+    def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
         X_out = X_in.copy()
 
         # 1) Cast numeric-like string/category columns
