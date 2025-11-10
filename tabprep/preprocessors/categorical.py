@@ -16,8 +16,10 @@ from tabprep.utils.modeling_utils import clean_feature_names
 from tabprep.preprocessors.base import CategoricalBasePreprocessor
 
 from typing import List, Dict, Any, Literal
+from sklearn.model_selection import KFold, StratifiedKFold
 
 # TODO: Adjust to new preprocessing logic
+# TODO: Add duplicate filter (either using names or factorize after generation)
 class CatIntAdder(old_base):
     def __init__(self, 
                  target_type, 
@@ -28,6 +30,8 @@ class CatIntAdder(old_base):
                  add_freq=False, 
                  only_freq=False,
                  min_cardinality=6,
+                 fillna: int = 0,
+                 log: bool = False,
                  **kwargs
                  ):
         super().__init__(target_type=target_type)
@@ -40,6 +44,8 @@ class CatIntAdder(old_base):
         self.add_freq = add_freq
         self.only_freq = only_freq
         self.min_cardinality = min_cardinality
+        self.fillna = fillna
+        self.log = log
 
         self.new_dtypes = {}
 
@@ -49,13 +55,8 @@ class CatIntAdder(old_base):
         # TODO: Implement as matrix operations to speed up the process
         X = X_in.copy()
         X = X.astype('U')
-        feat_combs = set(combinations(np.unique(X.columns), order))
-
-        if num_operations == "all":
-            feat_combs_use = feat_combs
-        else:
-            feat_combs_use = sample_from_set(feat_combs, num_operations)
-        feat_combs_use_arr = np.array(list(feat_combs_use)).transpose()
+        feat_combs_use = list(combinations(np.unique(X.columns), order))
+        feat_combs_use_arr = np.array(feat_combs_use).transpose()
 
         new_names = ["_&_".join([str(i) for i in sorted(f_use)]) for f_use in feat_combs_use]
 
@@ -99,7 +100,7 @@ class CatIntAdder(old_base):
                 self.combine(X_use, order=order, num_operations=self.num_operations)
             ], axis=1)
 
-        self.new_col_set = list(set(X_new.columns)-set(X.columns))
+        self.new_col_set = [c for c in X_new.columns if c not in X.columns]
         
         if self.use_filters:
             self.get_dummy_mean_scores(X_new[self.new_col_set], y)
@@ -124,7 +125,7 @@ class CatIntAdder(old_base):
     
         X_new = DropDuplicatesFeatureGenerator().fit_transform(X_new)
 
-        self.new_col_set = list(set(X_new.columns)-set(X.columns))
+        self.new_col_set = [c for c in X_new.columns if c not in X.columns]
 
         for col in self.new_col_set:
             # TODO: Might need to add option for NANs
@@ -132,14 +133,14 @@ class CatIntAdder(old_base):
 
         if self.add_freq or self.only_freq:
             # TODO: Unclear whether there is a more efficient way to do this
-            cat_freq = FrequencyEncoder()
+            cat_freq = FrequencyEncoder(fillna=self.fillna, log=self.log)
             candidate_cols = cat_freq.filter_candidates_by_distinctiveness(X_new[self.new_col_set])
             if len(candidate_cols) > 0:
-                self.cat_freq = FrequencyEncoder(candidate_cols=candidate_cols).fit(X_new[candidate_cols], y)        
+                self.cat_freq = FrequencyEncoder(candidate_cols=candidate_cols, fillna=self.fillna, log=self.log).fit(X_new[candidate_cols], y)
 
         return self
     
-    def transform(self, X_in):
+    def transform(self, X_in, **kwargs):
         X = X_in.copy()
 
         X_out = pd.DataFrame(index=X.index)
@@ -181,13 +182,8 @@ class CatGroupByAdder(BaseEstimator, TransformerMixin):
         self.cnt_map = {}
         X = X_in.copy()
         X = X.astype('U')
-        feat_combs = set(combinations(np.unique(X.columns), order))
-
-        if num_operations == "all":
-            feat_combs_use = feat_combs
-        else:
-            feat_combs_use = sample_from_set(feat_combs, num_operations)
-        feat_combs_use_arr = np.array(list(feat_combs_use)).transpose()
+        feat_combs_use = list(combinations(np.unique(X.columns), order))
+        feat_combs_use_arr = np.array(feat_combs_use).transpose()
 
         new_cols = []
         for col1, col2 in zip(feat_combs_use_arr[0], feat_combs_use_arr[1]):
@@ -252,11 +248,11 @@ class CatGroupByAdder(BaseEstimator, TransformerMixin):
         X_new = X_new.loc[: , (X_new.nunique()>1).values]
         X_new = self.correlation_filter(X_new, threshold=0.95)  # Apply correlation filter
         
-        self.new_col_set = list(set(X_new.columns)-set(X.columns))
+        self.new_col_set = [c for c in X_new.columns if c not in X.columns]
         
         return self
     
-    def transform(self, X_in):
+    def transform(self, X_in, **kwargs):
         X = X_in.copy()
 
         X_out = X.copy() # pd.DataFrame(index=X.index)
@@ -298,7 +294,7 @@ class OneHotPreprocessor(CategoricalBasePreprocessor):
         self.feature_names_ = self.encoder_.get_feature_names_out(X.columns)
         return self
 
-    def _transform(self, X: pd.DataFrame) -> pd.DataFrame:
+    def _transform(self, X: pd.DataFrame, **kwargs) -> pd.DataFrame:
         arr = self.encoder_.transform(X)
         return pd.DataFrame(arr, index=X.index, columns=self.feature_names_)
    
@@ -359,7 +355,7 @@ class CatLOOTransformer(CategoricalBasePreprocessor):
 
         return self
 
-    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+    def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
         X_out = X_in.copy()
         for col in X_out.columns:
             if X_out[col].isna().sum()>0:
@@ -414,7 +410,7 @@ class TargetEncodingTransformer(CategoricalBasePreprocessor):
 
         return self
 
-    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+    def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
         X_out = X_in.copy()
         X_out = self.loo_.transform(X_out)
         X_out = pd.DataFrame(X_out, index=X_in.index, columns=X_in.columns)
@@ -431,7 +427,7 @@ class DropCatTransformer(CategoricalBasePreprocessor):
         if len(self.drop_cols) == 0:
             print("Warning: No categorical columns to drop.")
 
-    def _transform(self, X_in: pd.DataFrame) -> pd.DataFrame:
+    def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
         return pd.DataFrame(index=X_in.index)
 
     def _get_affected_columns(self, X: pd.DataFrame):
@@ -441,5 +437,136 @@ class DropCatTransformer(CategoricalBasePreprocessor):
             affected_columns_ = []
             unaffected_columns_ = X.columns.tolist()
         return affected_columns_, unaffected_columns_
-        
 
+
+class OOFTargetEncoder(CategoricalBasePreprocessor):
+    """
+    KFold out-of-fold target encoding (regression / binary / multiclass)
+    Interpretation A:
+      - fit(...) computes + stores OOF TRAIN encodings and full-train stats
+      - transform(..., is_train=True) returns stored train encodings
+      - transform(..., is_train=False) encodes new data using full stats
+    """
+
+    def __init__(self, 
+                 target_type:str,
+                 n_splits:int=5,
+                 alpha:float=10.0,
+                 random_state:int=42,
+                 keep_original: bool = False,
+                 ):
+        super().__init__(keep_original=keep_original)
+        assert target_type in {"regression","binary","multiclass"}
+        self.target_type = target_type
+        self.n_splits = n_splits
+        self.alpha = alpha
+        self.random_state = random_state
+
+    # -----------------------------------------------------------
+    def _fit(self, X_in, y_in):
+        X = X_in.copy()
+        y = y_in.copy()
+        X = pd.DataFrame(X).reset_index(drop=True)
+        y = pd.Series(y).reset_index(drop=True)
+        X = X.astype('object')
+        self.cols_ = list(X.columns)
+
+        # convert y to matrix by target_type
+        if self.target_type == "regression":
+            kf = KFold(self.n_splits, shuffle=True, random_state=self.random_state)
+            Y = y.values[:,None]
+
+        elif self.target_type == "binary":
+            kf = StratifiedKFold(self.n_splits, shuffle=True, random_state=self.random_state)
+            # require y {0,1} or {labelA,labelB}
+            if y.dtype.name == "category":
+                y = y.cat.codes
+            classes = np.unique(y)
+            assert len(classes) == 2, "binary target_type but >2 classes"
+            Y = (y.values == classes[-1]).astype(float)[:,None]
+            self.classes_ = classes
+
+        else: # multiclass
+            kf = StratifiedKFold(self.n_splits, shuffle=True, random_state=self.random_state)
+            if y.dtype.name == "category":
+                y = y.cat.codes
+            classes = np.unique(y)
+            self.classes_ = classes
+            K = len(classes)
+            Y = np.zeros((len(y),K))
+            for i,c in enumerate(classes):
+                Y[:,i] = (y.values==c).astype(float)
+
+        self.Y_ = Y
+        self.X_ = X
+
+        store = []
+
+        for col in self.cols_:
+            oof = np.zeros((len(X), Y.shape[1]))
+            col_values = X[col]
+
+            for tr,val in kf.split(X, y):
+                df = pd.DataFrame({"cat":X[col]})
+                for j in range(Y.shape[1]):
+                    df[f"y{j}"] = Y[:,j]
+
+                g = df.iloc[tr].groupby("cat", observed=True).agg(["count","mean"])
+                for j in range(Y.shape[1]):
+                    m = g[("y"+str(j),"mean")]
+                    c = g[("y"+str(j),"count")]
+                    enc = (m*c + self.alpha*m.mean())/(c + self.alpha)
+                    oof[val,j] = col_values.iloc[val].map(enc).fillna(m.mean())
+
+            # names
+            if Y.shape[1]==1:
+                names=[f"{col}__te"]
+            else:
+                names=[f"{col}__te_class{j}" for j in range(Y.shape[1])]
+            store.append(pd.DataFrame(oof, columns=names, index=X_in.index))
+
+        self.train_encoded_ = pd.concat(store, axis=1)
+
+        # full train stats (for test/inference)
+        full_stats = {}
+        for col in self.cols_:
+            df = pd.DataFrame({"cat":X[col]})
+            for j in range(Y.shape[1]):
+                df[f"y{j}"] = Y[:,j]
+            g = df.groupby("cat", observed=True).agg(["count","mean"])
+            full_stats[col] = g
+        self.full_stats_ = full_stats
+
+        return self
+
+    # -----------------------------------------------------------
+    def _transform(self, X_in, is_train:bool=False, **kwargs):
+        X = pd.DataFrame(X_in).reset_index(drop=True)
+        X = X.astype('object')
+
+        if is_train:
+            # return stored OOF train encodings
+            # rather than recomputing
+            assert hasattr(self,"train_encoded_"), "fit() not called"
+            return self.train_encoded_.copy()
+
+        # else new data: use full_stats
+        out = []
+        for col in self.cols_:
+            arr = np.zeros((len(X), self.Y_.shape[1]))
+            col_series = X[col]
+            g = self.full_stats_[col]
+
+            for j in range(self.Y_.shape[1]):
+                m = g[("y"+str(j),"mean")]
+                c = g[("y"+str(j),"count")]
+                enc = (m*c + self.alpha*m.mean())/(c + self.alpha)
+                arr[:,j] = col_series.map(enc).fillna(m.mean())
+
+            if self.Y_.shape[1]==1:
+                names=[f"{col}__te"]
+            else:
+                names=[f"{col}__te_class{j}" for j in range(self.Y_.shape[1])]
+            out.append(pd.DataFrame(arr, columns=names, index=X_in.index))
+
+        return pd.concat(out, axis=1)
