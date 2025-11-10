@@ -23,13 +23,31 @@ class LGBPresetRegistry:
                  presets: Optional[Dict[str, Dict[str, Any]]] = None,
                  use_experimental: bool = False,
                  ) -> None:
-        self._presets: Dict[str, Dict[str, Any]] = self.get_default_presets(target_type=target_type)
+        self._presets: Dict[str, Dict[str, Any]] = self.get_default_presets()
         if presets:
             # user-supplied presets override defaults
             self._presets.update(presets)
         if use_experimental:
             from tabprep.presets.lgb_presets_experimental import get_experimental_presets
-            self._presets.update(get_experimental_presets(target_type=target_type))
+            self._presets.update(get_experimental_presets())
+
+        for preset_name, preset in self._presets.items():
+            self._presets[preset_name] = self.map_preprocessors(preset, target_type)
+
+    def map_preprocessors(self, preset: dict, target_type: str) -> list:
+        from tabprep.preprocessors.preprocessor_map import get_preprocessor
+        if len(preset['prep_params']) == 0:
+            return preset
+        
+        preprocessors = []
+        for prep_name, init_params in preset['prep_params'].items():
+            preprocessor_class = get_preprocessor(prep_name)
+            if preprocessor_class is not None:
+                preprocessors.append(preprocessor_class(target_type=target_type, **init_params))
+            else:
+                raise ValueError(f"Preprocessor {prep_name} not recognized.")
+        preset['prep_params'] = preprocessors
+        return preset
 
     def available_presets(self) -> List[str]:
         """Return available preset names."""
@@ -66,13 +84,19 @@ class LGBPresetRegistry:
             "boosting_type": "gbdt",
             "n_estimators": 10000,
             "verbosity": -1,
+            **{key: value for key, value in self._presets[preset].items() if key not in  ["prep_params", "cv_params"]}
         }
 
-        init_params.update(self._presets[preset]['init_params'])
-        if overrides:
-            init_params.update(overrides)
+        # init_params.update(self._presets[preset]['init_params'])
+        # if overrides:
+        #     init_params.update(overrides)
 
-        return init_params, self._presets[preset]['preprocessors'], self._presets[preset]['cv_params']
+        if 'cv_params' in self._presets[preset]:
+            cv_params = self._presets[preset]['cv_params']
+        else:
+            cv_params = dict()
+
+        return init_params, self._presets[preset]['prep_params'], cv_params
 
     def presets_dict(self) -> Dict[str, Dict[str, Any]]:
         """Return a deep copy of the full preset dictionary."""
@@ -110,10 +134,10 @@ class LGBPresetRegistry:
         pass
 
     @staticmethod
-    def get_default_presets(target_type: str) -> Dict[str, Dict[str, Any]]:
+    def get_default_presets() -> Dict[str, Dict[str, Any]]:
         # TODO: Add risk ranking to presets
         # TODO: Remove experimental presets
-        return get_lgb_presets(target_type=target_type)
+        return get_lgb_presets()
 
     def update_default_presets(self, target_type: str, new_presets: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         presets = self._default_presets(target_type=target_type)
