@@ -1,5 +1,7 @@
 import pandas as pd
+import numpy as np
 from tabprep.preprocessors.base import BasePreprocessor
+from typing import Literal
 
 class FrequencyEncoder(BasePreprocessor):
     def __init__(self, 
@@ -7,12 +9,20 @@ class FrequencyEncoder(BasePreprocessor):
                  only_categorical: bool = True,
                  candidate_cols: list = None, 
                  use_filters: bool = True,
+                 fillna: int | None = 0,
+                 log: bool =False,
                  **kwargs
                  ):
         super().__init__(keep_original=keep_original)
         self.only_categorical = only_categorical
         self.candidate_cols = candidate_cols
         self.use_filters = use_filters
+        self.log = log
+
+        if fillna is None:
+            self.fillna = np.nan
+        else:
+            self.fillna = fillna
         
         self.freq_maps = {}
 
@@ -37,15 +47,18 @@ class FrequencyEncoder(BasePreprocessor):
 
         return self
     
-    def _transform(self, X_in):
+    def _transform(self, X_in, **kwargs):
         X = X_in.copy()
 
         new_cols = []
         for col in X.columns:
             x = X[col]
             if x.name in self.freq_maps:
-                new_col = x.map(self.freq_maps[x.name]).astype(float).fillna(0)
+                new_col = x.map(self.freq_maps[x.name]).astype(float).fillna(self.fillna)
                 new_col.name = x.name + "_freq"
+                if self.log:
+                    new_col = np.log1p(new_col)
+                    new_col.name += "_log"    
                 new_cols.append(new_col)
             else:
                 continue
