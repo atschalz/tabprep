@@ -5,7 +5,8 @@ from category_encoders.leave_one_out import LeaveOneOutEncoder
 from sklearn.preprocessing import TargetEncoder
 from tabprep.preprocessors.frequency import FrequencyEncoder
 from autogluon.features.generators.drop_duplicates import DropDuplicatesFeatureGenerator
-from tabprep.utils.misc import sample_from_set
+from autogluon.features.generators.category import CategoryFeatureGenerator
+from tabprep.utils.misc import sample_from_set, add_infrequent_category
 from itertools import combinations
 from sklearn.base import BaseEstimator, TransformerMixin
 from tabprep.utils.misc import drop_highly_correlated_features
@@ -17,6 +18,49 @@ from tabprep.preprocessors.base import CategoricalBasePreprocessor
 
 from typing import List, Dict, Any, Literal
 from sklearn.model_selection import KFold, StratifiedKFold
+
+import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
+
+class InfrequentCategoryMerger(BaseEstimator, TransformerMixin):
+    """
+    Collapse infrequent categories in categorical or object columns into a single label.
+
+    Parameters
+    ----------
+    min_count : int, default=5
+        Minimum number of occurrences a category must have to be kept.
+    new_label : str, default='Other'
+        Label assigned to infrequent categories.
+    """
+
+    def __init__(self, min_count: int = 5, new_label: str = "Other"):
+        self.min_count = min_count
+        self.new_label = new_label
+        self.frequent_levels_ = {}
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X)
+        self.frequent_levels_ = {
+            col: X[col].value_counts()[lambda c: c >= self.min_count].index
+            for col in X.columns
+        }
+        return self
+
+    def transform(self, X):
+        X = pd.DataFrame(X).copy()
+        for col in X.columns:
+            freq = self.frequent_levels_[col]
+            s = X[col]
+            if isinstance(s.dtype, pd.CategoricalDtype):
+                if self.new_label not in s.cat.categories:
+                    s = s.cat.add_categories([self.new_label])
+                s = s.where(s.isin(freq), self.new_label)
+                s = s.cat.remove_unused_categories()
+            else:
+                s = s.where(s.isin(freq), self.new_label)
+            X[col] = s
+        return X
 
 # TODO: Adjust to new preprocessing logic
 # TODO: Add duplicate filter (either using names or factorize after generation)
@@ -30,8 +74,11 @@ class CatIntAdder(old_base):
                  add_freq=False, 
                  only_freq=False,
                  min_cardinality=6,
+                 min_count:int=2,
+                 max_new_features: int = 500,
                  fillna: int = 0,
                  log: bool = False,
+                 max_base_interactions=100,
                  **kwargs
                  ):
         super().__init__(target_type=target_type)
@@ -44,21 +91,37 @@ class CatIntAdder(old_base):
         self.add_freq = add_freq
         self.only_freq = only_freq
         self.min_cardinality = min_cardinality
+        self.min_count = min_count
+        self.max_new_features = max_new_features
         self.fillna = fillna
         self.log = log
+        self.max_base_interactions = max_base_interactions
 
         self.new_dtypes = {}
+        self.infreq_merger = InfrequentCategoryMerger(min_count=self.min_count)
 
         del self.cv_func, self.adjust_target_format # NOTE: Necessary to store AG models with pickle
 
-    def combine(self, X_in, order=2, num_operations='all', seed=42, **kwargs):
+    def combine(self, X_in, order=2, max_base_interactions=100, seed=42, **kwargs):
         # TODO: Implement as matrix operations to speed up the process
         X = X_in.copy()
         X = X.astype('U')
         feat_combs_use = list(combinations(np.unique(X.columns), order))
-        feat_combs_use_arr = np.array(feat_combs_use).transpose()
+        feat_combs_use_arr = np.array(feat_combs_use)
 
-        new_names = ["_&_".join([str(i) for i in sorted(f_use)]) for f_use in feat_combs_use]
+        if len(feat_combs_use_arr) > max_base_interactions:
+            feat_combs_use_arr = feat_combs_use_arr[np.random.choice(len(feat_combs_use_arr), max_base_interactions, replace=False)].T
+        else:
+            feat_combs_use_arr = feat_combs_use_arr.T
+
+        # cols = X.columns.to_numpy()
+        # combs = np.array(list(combinations(cols, order)))
+
+        # # Sample combinations directly instead of shuffling entire array
+        # if len(combs) > max_base_interactions:
+        #     combs = combs[np.random.choice(len(combs), max_base_interactions, replace=False)]
+
+        new_names = ["_&_".join([str(i) for i in sorted(f_use)]) for f_use in feat_combs_use_arr.T]
 
         features = X[feat_combs_use_arr[0]].values
         for num, arr in enumerate(feat_combs_use_arr[1:]):
@@ -97,8 +160,19 @@ class CatIntAdder(old_base):
         X_new = pd.DataFrame(index=X_use.index)
         for order in range(2, self.max_order+1):
             X_new = pd.concat([X_new,
-                self.combine(X_use, order=order, num_operations=self.num_operations)
+                self.combine(X_use, order=order, num_operations=self.num_operations, max_base_interactions=self.max_base_interactions)
             ], axis=1)
+            # Apply frequency filter on new columns
+            # X_new = InfrequentCategoryMerger(min_count=self.min_count).fit_transform(X_new)
+            # X_new = X_new.apply(lambda col: add_infrequent_category(col, min_count=self.min_count))
+            highest_freq = X_new.apply(lambda col: col.value_counts().iloc[0])>=self.min_count
+            highest_freq.index[highest_freq.values]
+            X_new = X_new.loc[: , highest_freq.index[highest_freq.values]]
+
+            if X_new.shape[1] >= self.max_new_features:
+                # sampled_cols = sample_from_set(X_new.columns.tolist(), self.max_new_features, random_state=42)
+                # X_new = X_new[sampled_cols]
+                break
 
         self.new_col_set = [c for c in X_new.columns if c not in X.columns]
         
@@ -121,15 +195,17 @@ class CatIntAdder(old_base):
                         X_new = X_new.drop(columns=drop_cols, errors='ignore')
             
             X_new = X_new.drop(columns=drop_cols, errors='ignore')
-        X_new = pd.concat([X_use, X_new], axis=1)
-    
+        
         X_new = DropDuplicatesFeatureGenerator().fit_transform(X_new)
+        self.cat_transformer = CategoryFeatureGenerator(minimum_cat_count=1)
+        X_new = self.cat_transformer.fit_transform(X_new)
+        # X_new = self.infreq_merger.fit_transform(X_new)
 
         self.new_col_set = [c for c in X_new.columns if c not in X.columns]
 
-        for col in self.new_col_set:
-            # TODO: Might need to add option for NANs
-            self.new_dtypes[col] = X_new[col].astype('category').dtype
+        # for col in self.new_col_set:
+        #     # TODO: Might need to add option for NANs
+        #     self.new_dtypes[col] = X_new[col].astype('category').dtype
 
         if self.add_freq or self.only_freq:
             # TODO: Unclear whether there is a more efficient way to do this
@@ -149,10 +225,17 @@ class CatIntAdder(old_base):
                 col_set_use = [col for col in self.new_col_set if col.count('_&_')+1 == degree]
                 if len(col_set_use) > 0:
                     X_degree = self.combine_predefined(X, col_set_use)
-                    for col in X_degree.columns:
-                        X_degree[col] = X_degree[col].astype(self.new_dtypes[col])
+                    # for col in X_degree.columns:
+                    #     X_degree[col] = X_degree[col].astype(self.new_dtypes[col])
                     X_out = pd.concat([X_out, X_degree], axis=1)
-                    
+            
+            # X_out = self.infreq_merger.transform(X_out)    
+            X_out = self.cat_transformer.transform(X_out)
+
+            # for col in X_out.columns:
+            #     X_out[col] = X_out[col].astype(self.new_dtypes[col])
+
+
             if self.add_freq or self.only_freq:
                 X_out = self.cat_freq.transform(X_out)
             if self.only_freq:
@@ -570,3 +653,34 @@ class OOFTargetEncoder(CategoricalBasePreprocessor):
             out.append(pd.DataFrame(arr, columns=names, index=X_in.index))
 
         return pd.concat(out, axis=1)
+
+class BinaryOOFTESumEncoder(OOFTargetEncoder):
+    """
+    KFold out-of-fold target encoding (binary classification only) with sum aggregation of class encodings. 
+    """
+
+    def __init__(self, 
+                 target_type:str,
+                 n_splits:int=5,
+                 alpha:float=10.0,
+                 random_state:int=42,
+                 keep_original: bool = True,
+                 ):
+        super().__init__(target_type=target_type,
+                         n_splits=n_splits,
+                         alpha=alpha,
+                         random_state=random_state,
+                         keep_original=keep_original
+                         )
+
+    def _fit(self, X_in, y_in):
+        return super()._fit(X_in.astype('object'), y_in)
+
+    def _transform(self, X_in, is_train:bool=False, **kwargs):
+        X_encoded = super()._transform(X_in.astype('object'), is_train=is_train, **kwargs)
+        return pd.DataFrame(X_encoded.mean(axis=1), columns=['OOFTESumOverAll'])
+
+    def _get_affected_columns(self, X: pd.DataFrame) -> tuple[list[str], list[str]]:
+        affected_columns_ = X.columns[X.nunique() == 2].tolist()
+        unaffected_columns_ = X.drop(columns=affected_columns_).columns.tolist()
+        return affected_columns_, unaffected_columns_
