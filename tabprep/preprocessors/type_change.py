@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import OrdinalEncoder
 from tabprep.preprocessors.base import BasePreprocessor, CategoricalBasePreprocessor
+from tabprep.utils.misc import add_infrequent_category
 
 from typing import List, Dict
 
@@ -15,26 +16,41 @@ class ToCategoricalTransformer(BasePreprocessor):
             keep_original: bool = False, 
             only_numerical: bool = False,
             min_cardinality: int = 6,
+            min_count: int = 0,
+            max_features: int = None,
             **kwargs
             ):
         # TODO: Add min_frequency to only transform categories with a minimum frequency
         super().__init__(keep_original=keep_original)
         self.min_cardinality = min_cardinality
         self.only_numerical = only_numerical
+        self.min_count = min_count
+        self.max_features = max_features
         self.categories_ = {}
 
     def _fit(self, X_in, y_in=None):
-        X = X_in.copy()
+        X = X_in.copy().astype('object')
+        if self.min_count > 0:
+            X_new = X.apply(lambda col: add_infrequent_category(col, min_count=self.min_count))
+            X_new = X.loc[: , (X_new.nunique()>1).values]
+        else:
+            X_new = X.loc[: , (X.nunique()>1).values]
+
+        if self.max_features is not None:
+            val_cnt = pd.Series({col: X_new[col].value_counts().mean() for col in X_new.columns})
+            use_cols = val_cnt.sort_values(ascending=False).head(self.max_features).index.tolist()
+        else :
+            use_cols = X_new.columns.tolist()
 
         # Store categories for each column
         # TODO: Might need to do something with values unseen during fit (& also NAs)
         self.categories_ = {
-            col: pd.Series(X[col], dtype="category").cat.categories for col in X.columns
+            col: pd.Series(X_new[col], dtype="category").cat.categories for col in use_cols
         }
         return self
 
     def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        X = X_in.copy()
+        X = X_in.copy().astype('object')
         X_out = pd.DataFrame(index=X.index)
 
         for col in self.categories_:
