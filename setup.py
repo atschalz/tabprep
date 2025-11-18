@@ -8,6 +8,7 @@ requirements = [
     "huggingface-hub",
     'kditransform',
     'skrub',
+    'numexpr',
 ]
 
 extras_require = {
