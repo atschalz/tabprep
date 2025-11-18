@@ -481,3 +481,17 @@ def drop_highly_correlated_features(
         i -= 1
 
     return corr_matrix
+
+def add_infrequent_category(s: pd.Series, min_count: int = 5, new_label: str = "Other") -> pd.Series:
+    counts = s.value_counts()
+    infreq = counts[counts < min_count].index
+
+    if isinstance(s.dtype, pd.CategoricalDtype):
+        if new_label not in s.cat.categories:
+            s = s.cat.add_categories([new_label])
+        s = s.where(~s.isin(infreq), new_label)
+        s = s.cat.remove_unused_categories()
+    else:
+        s = s.where(~s.isin(infreq), new_label)
+
+    return s
