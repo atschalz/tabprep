@@ -5,6 +5,9 @@ from scipy.special import expit
 from sklearn.neighbors import KNeighborsRegressor
 from lightgbm import LGBMClassifier, LGBMRegressor
 from sklearn.cluster import MiniBatchKMeans
+from sklearn.preprocessing import PolynomialFeatures
+
+from typing import Literal, List
 
 class TargetMeanClassifier(ClassifierMixin, BaseEstimator):
     """Vectorized target-mean classifier with NaN-as-own-category support."""
@@ -988,26 +991,69 @@ class KMeansBinner(BaseEstimator, TransformerMixin):
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
-from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge, Lasso
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
+from skrub import SquashingScaler
 
-class CustomLinearModel(BaseEstimator):
-    def __init__(self, target_type, standardize_target=True):
-        self.target_type = target_type  # 'regression' or 'classification'
+class CustomModel(BaseEstimator):
+    def __init__(self, 
+                 target_type,
+                 scaler='squashing',
+                 standardize_target=True,
+                 cat_method:Literal['ohe','oof-te']='ohe',
+                 scale_binary:bool=True,
+                 **kwargs
+                 ):
+
+        self.target_type = target_type
         self.standardize_target = standardize_target
+        self.cat_method = cat_method
+        self.scale_binary = scale_binary
+        
+        if self.target_type == 'regression' and self.standardize_target:
+            self.target_scaler = StandardScaler()
+        elif self.target_type in ['binary', 'multiclass']:
+            self.target_scaler = None
+        else:
+            raise ValueError("target_type must be 'binary', 'multiclass', or 'regression'")
 
-        # Initialize internal variables
-        self.model = None
-        self.target_scaler = None
         self.pipeline = None
+        self.model: BaseEstimator = None
+        if self.cat_method == 'oof-te':
+            from tabprep.preprocessors.categorical import OOFTargetEncoder
+            self.oof_te = OOFTargetEncoder(target_type=self.target_type, keep_original=False, alpha=10.)
+        else:
+            self.oof_te = None
 
-    def fit(self, X_in, y_in):
-        X = X_in.copy()
-        y = y_in.copy()
+        # --------------- feature scaling ------------ #
+        if scaler == 'standard':
+            self.scaler = StandardScaler()
+        elif scaler == 'quantile-normal':
+            from sklearn.preprocessing import QuantileTransformer
+            self.scaler = QuantileTransformer(output_distribution='normal')
+        elif scaler == 'quantile-uniform':
+            from sklearn.preprocessing import QuantileTransformer
+            self.scaler = QuantileTransformer(output_distribution='uniform')
+        elif scaler == 'squashing':
+            self.scaler = SquashingScaler()
+        elif scaler == 'squashing':
+            self.scaler = SquashingScaler()
+        elif scaler is None:
+            self.scaler = None
+        else:
+            raise ValueError("scaler must be 'standard', 'quantile-normal', 'quantile-uniform', 'squashing', or None")
+
+    def _fit_preprocessor(self, X, y, **kwargs):
+        if self.cat_method == 'oof-te':
+            X = self.oof_te.fit_transform(X, y)
+
+        if not self.scale_binary:
+            X.loc[:, X.nunique() == 2] = X.loc[:, X.nunique() == 2].astype('object')
+
         # Determine which columns are categorical or numerical
         categorical_cols = X.select_dtypes(include=['object', 'category']).columns
         numerical_cols = X.select_dtypes(include=[np.number]).columns
@@ -1016,11 +1062,12 @@ class CustomLinearModel(BaseEstimator):
         transformers = [
             ('num', Pipeline([
                 ('imputer', SimpleImputer(strategy='mean')),
-                ('scaler', StandardScaler())
+                ('scaler', self.scaler)
             ]), numerical_cols),
             ('cat', Pipeline([
                 ('imputer', SimpleImputer(strategy='most_frequent')),
                 ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False, max_categories=100))
+                # ('pass', 'passthrough')
             ]), categorical_cols)
         ]
 
@@ -1029,28 +1076,37 @@ class CustomLinearModel(BaseEstimator):
 
         # Fit the transformers and transform the data
         self.pipeline.fit(X)
-        X_transformed = self.pipeline.transform(X) 
-        
-        if self.target_type == 'regression':
-            # Standardize the target if regression
-            self.target_scaler = StandardScaler()
-            y_scaled = self.target_scaler.fit_transform(y.values.reshape(-1, 1)).flatten()
 
-            # Fit the regression model (using LinearRegression)
-            self.model = LinearRegression()
-            self.model.fit(X_transformed, y_scaled)
-        elif self.target_type in ['binary', 'multiclass']:
-            # Fit the classification model (using LogisticRegression)
-            self.model = LogisticRegression()
-            self.model.fit(X_transformed, y)
-        else:
-            raise ValueError("target_type must be 'regression' or 'classification'")
+        if self.target_type == 'regression':
+            self.target_scaler.fit(y.values.reshape(-1, 1))
+
+
+    def preprocess(self, X, y=None, is_train=False, **kwargs):
+        if self.cat_method == 'oof-te':
+            X = self.oof_te.transform(X, is_train=is_train)
+
+        if not self.scale_binary:
+            X.loc[:, X.nunique() == 2] = X.loc[:, X.nunique() == 2].astype('object')
+
+        X = self.pipeline.transform(X)
+        if self.target_type == 'regression' and y is not None:
+            y = self.target_scaler.transform(y.values.reshape(-1, 1)).flatten()
+        return X, y
+
+    def fit(self, X_in, y_in, **kwargs):
+        X = X_in.copy()
+        y = y_in.copy()
+        
+        self._fit_preprocessor(X, y)            
+        X, y = self.preprocess(X, y, is_train=True) 
+        
+        self.model.fit(X, y)
 
         return self
 
-    def predict(self, X):
+    def predict(self, X, is_train=False, **kwargs):
         # Transform the features using the fitted pipeline
-        X_transformed = self.pipeline.transform(X)
+        X_transformed, _ = self.preprocess(X, is_train=is_train)
 
         # Predict based on the model type
         if self.target_type == 'regression':
@@ -1062,78 +1118,505 @@ class CustomLinearModel(BaseEstimator):
         elif self.target_type == 'multiclass':
             return self.model.predict_proba(X_transformed)
         else:
-            raise ValueError("target_type must be 'regression' or 'classification'")
+            raise ValueError("target_type must be 'binary', 'regression' or 'classification'")
+        
+    def decision_function(self, X, is_train=False, **kwargs):
+        # FIXME: Think what to do for regression
+        # Transform the features using the fitted pipeline
+        if self.cat_method == 'oof-te':
+            X = self.oof_te.transform(X, is_train=is_train)
+        X_transformed = self.pipeline.transform(X)
 
+        if self.target_type == 'binary':
+            return self.model.decision_function(X_transformed)
+        elif self.target_type == 'multiclass':
+            return self.model.decision_function(X_transformed)
+        else:
+            raise ValueError("target_type must be 'binary' or 'classification'")
 
+from sklearn.model_selection import KFold, StratifiedKFold
+class OOFCustomModel:
+    def __init__(self, 
+                 target_type,
+                 base_model_cls: BaseEstimator,
+                 base_model_kwargs: None,
+                 n_splits:int=5,
+                 random_state:int=42,
+                 ):
+        assert target_type in {"regression","binary","multiclass"}
+        self.target_type = target_type
+        self.n_splits = n_splits
+        self.random_state = random_state
+
+        if base_model_kwargs is None:
+            base_model_kwargs = {}
+
+        if self.target_type == "regression":
+            self.kf = KFold(self.n_splits, shuffle=True, random_state=self.random_state)
+        else:
+            self.kf = StratifiedKFold(self.n_splits, shuffle=True, random_state=self.random_state)
+
+        self.fold_models_: List[BaseEstimator] = [base_model_cls(**base_model_kwargs) for _ in range(self.n_splits)]
+        self.full_model: BaseEstimator = base_model_cls(**base_model_kwargs)
+
+    # -----------------------------------------------------------
+    def fit(self, X_in, y_in):
+        X = X_in.copy()
+        y = y_in.copy()
+
+        oof_preds = []
+        for num, (tr, val) in enumerate(self.kf.split(X, y)):
+            X_tr = X.iloc[tr]
+            y_tr = y.iloc[tr]   
+            X_val = X.iloc[val]
+
+            self.fold_models_[num].fit(X_tr, y_tr)
+            if self.target_type == "multiclass":
+                oof_preds.append(pd.DataFrame(self.fold_models_[num].predict(X_val), index=X.index[val]))
+            else:
+                oof_preds.append(pd.Series(self.fold_models_[num].predict(X_val), index=X.index[val]))
+
+        self.train_preds_ = pd.concat(oof_preds, axis=0).loc[X.index]
+        self.train_decisions_ = pd.concat(oof_preds, axis=0).loc[X.index].values
+
+        self.full_model.fit(X, y)
+
+        return self
+
+    # -----------------------------------------------------------
+    def predict(self, X_in, is_train:bool=False, **kwargs):
+        X = X_in.copy()
+
+        # TODO: Make sure that the order of samples in X matches training data. 
+        if is_train:
+            # return stored OOF train encodings
+            # rather than recomputing
+            assert hasattr(self,"train_preds_"), "fit() not called"
+            return self.train_preds_.copy()
+
+        return self.full_model.predict(X, is_train=is_train, **kwargs)
+    
+    def decision_function(self, X_in, is_train:bool=False, **kwargs):
+        X = X_in.copy()
+
+        # TODO: Make sure that the order of samples in X matches training data. 
+        if is_train:
+            # return stored OOF train encodings
+            # rather than recomputing
+            assert hasattr(self,"train_decisions_"), "fit() not called"
+            return self.train_decisions_.copy()
+
+        return self.full_model.decision_function(X, is_train=is_train, **kwargs)
+
+class CustomLinearModel(CustomModel):
+    def __init__(self, 
+                 target_type,
+                 scaler='squashing',
+                 standardize_target=True,
+                 cat_method='ohe',
+                 scale_binary=True,
+                 linear_model_type='lasso',    # linear, lasso, ridge
+                 lambda_: Literal['low', 'medium', 'high', float] = 'medium', # single regularization strength param
+                 max_degree: int = 1
+                 ):
+        super().__init__(target_type=target_type, scaler=scaler, standardize_target=standardize_target, cat_method=cat_method, scale_binary=scale_binary)
+
+        self.linear_model_type = linear_model_type
+        self.max_degree = max_degree
+
+        if isinstance(lambda_, str):
+            self.lambda_ = self.set_lambda_from_category(cat=lambda_)
+        else:
+            self.lambda_ = lambda_
+
+        if self.target_type == 'regression':
+            if self.linear_model_type == 'linear':
+                self.model = LinearRegression()
+            elif self.linear_model_type == 'lasso':
+                self.model = Lasso(alpha=self.lambda_)   # λ ↑ ⇒ more reg
+            elif self.linear_model_type == 'ridge':
+                self.model = Ridge(alpha=self.lambda_)   # λ ↑ ⇒ more reg
+            else:
+                raise ValueError("linear_model_type must be 'linear', 'lasso', or 'ridge'")
+
+        # --------------- classification ------------- #
+        elif self.target_type in ['binary', 'multiclass']:
+
+            # linear => no regularization
+            if self.linear_model_type == 'linear':
+                penalty = 'l2'
+                C = 1e9           # effectively infinite C = no reg
+                solver = 'lbfgs'
+
+            else:
+                # map lasso/ridge
+                penalty = 'l1' if self.linear_model_type == 'lasso' else 'l2'
+
+                # λ direction must match regression:
+                # λ ↑ ⇒ stronger regularization
+                # if self.lambda_ <= 0:
+                #     C = 1e9
+                # else:
+                #     C = 1.0 / self.lambda_
+
+                # auto solver
+                solver = 'saga' if penalty == 'l1' else 'lbfgs'
+
+            self.model = LogisticRegression(
+                penalty=penalty,
+                C=self.lambda_,
+                solver=solver,
+                max_iter=2000,
+                # multi_class='auto'
+            )
+            self.target_scaler = None
+        else:
+            raise ValueError("target_type must be 'binary', 'multiclass', or 'regression'")
+        
+        if self.max_degree > 1:
+            self.model = Pipeline([
+                ("poly", PolynomialFeatures(degree=self.max_degree, include_bias=False)),
+                ("ridge", self.model)
+            ])
+
+    def set_lambda_from_category(self, cat: str) -> float:
+        """
+        Set self.lambda_ to a single value chosen for the given category
+        ('low' | 'medium' | 'high') for this (target_type, linear_model_type).
+        Values are picked on a log scale from realistic ranges.
+        """
+        if cat not in {"low", "medium", "high"}:
+            raise ValueError("cat must be one of {'low','medium','high'}")
+
+        table = {
+            "regression": {
+                "linear":   {"low": 0.0,      "medium": 0.0,     "high": 0.0},
+                "ridge":    {"low": 0.1,   "medium": 1.,  "high": 10.},
+                # "lasso":    {"low": 6.3e-6,   "medium": 1.0e-4,  "high": 1.6e-3},
+                "lasso":    {"low": 1e-2,   "medium": 1e-3,  "high": 1e-4},
+            },
+            "binary": {
+                # 'linear' maps to L1 in your setup
+                "linear":   {"low": 4.0e-6,   "medium": 3.2e-5,  "high": 2.5e-4},
+                "ridge":    {"low": 10.,   "medium": 1.,  "high": 0.1},
+                "lasso":    {"low": 10.,   "medium": 1,  "high": 0.1},
+            },
+            "multiclass": {
+                # slightly stronger than binary for stability
+                "linear":   {"low": 1.0e-5,   "medium": 1.0e-4,  "high": 7.5e-4},
+                "ridge":    {"low": 2.0e-4,   "medium": 3.0e-3,  "high": 5.0e-2},
+                # "lasso":    {"low": 1.0e-5,   "medium": 1.0e-4,  "high": 7.5e-4},
+                "lasso":    {"low": 10,   "medium": 1,  "high": 0.1},
+            },
+        }
+
+        try:
+            lambda_ = table[self.target_type][self.linear_model_type][cat]
+        except KeyError:
+            raise ValueError(f"Unsupported combination target_type={self.target_type!r}, linear_model_type={self.linear_model_type!r}")
+        return lambda_
+
+class OOFCustomLinearModel(OOFCustomModel):
+    def __init__(self, 
+                 target_type,
+                 scaler='squashing',
+                 standardize_target=True,
+                 cat_method='ohe',
+                 scale_binary=True,
+                 n_splits:int=5,
+                 random_state:int=42,
+                 linear_model_type='lasso',    # linear, lasso, ridge
+                 lambda_: Literal['low', 'medium', 'high', float] = 'medium',                    # single regularization strength param
+                 max_degree: int = 1
+                 ):
+        base_model_kwargs = {
+            'target_type': target_type,
+            'scaler': scaler,
+            'standardize_target': standardize_target,
+            'cat_method': cat_method,
+            'scale_binary': scale_binary,
+            'linear_model_type': linear_model_type,
+            'lambda_': lambda_,
+            'max_degree': max_degree,
+        }
+        super().__init__(
+            target_type=target_type,
+            base_model_cls=CustomLinearModel,
+            base_model_kwargs=base_model_kwargs,
+            n_splits=n_splits,
+            random_state=random_state
+        )
+
+class GroupedCustomLinearModel:
+    def __init__(self, target_type, group_col='auto', min_samples=200):
+        self.target_type = target_type
+        self.group_col   = group_col
+        self.min_samples = min_samples
+
+    def fit(self, X, y):
+        # --- global model ---
+        self.global_model_ = CustomLinearModel(target_type=self.target_type)
+        self.global_model_.fit(X, y)
+
+        if self.group_col == 'auto':
+            self.group_col = X.select_dtypes(include=['object', 'category']).nunique().idxmax()
+
+        # --- group models ---
+        self.group_models_ = {}
+        for g in X[self.group_col].unique():
+            X_use = X[X[self.group_col]==g]
+            y_use = y[X[self.group_col]==g]
+            print(f'Category {g}: {len(X_use)} samples')
+            if len(X_use)>20:
+                self.group_models_[g] = CustomLinearModel(target_type=self.target_type).fit(X_use, y_use)
+            else:
+                # not enough data for group-specific model
+                self.group_models_[g] = self.global_model_
+
+        return self
+
+    def predict(self, X):
+        # baseline = global model
+        out = pd.Series(
+            self.global_model_.predict(X),
+            index=X.index
+        )
+
+        # override on groups with enough data
+        for g, m in self.group_models_.items():
+            idx = (X[self.group_col] == g)
+            if idx.any():
+                out.loc[idx] = m.predict(X.loc[idx])
+
+        return out
+    
+    def decision_function(self, X):
+        # baseline = global model
+        out = pd.Series(
+            self.global_model_.decision_function(X),
+            index=X.index
+        )
+
+        # override on groups with enough data
+        for g, m in self.group_models_.items():
+            idx = (X[self.group_col] == g)
+            if idx.any():
+                out.loc[idx] = m.decision_function(X.loc[idx])
+
+        return out
+
+from scipy.special import logit
 from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
-class CustomKNNModel(BaseEstimator):
-    def __init__(self, target_type, standardize_target=True, n_neighbors=1, weights='uniform'):
-        self.target_type = target_type  # 'regression' or 'classification'
-        self.standardize_target = standardize_target
+class CustomKNNModel(CustomModel):
+    def __init__(self, 
+                 target_type,
+                 scaler='squashing',
+                 standardize_target=True,
+                 n_neighbors:int=20,
+                 weights:str='distance',
+                 p:float=2,
+                 ):
+        super().__init__(target_type=target_type, scaler=scaler, standardize_target=standardize_target)
         self.n_neighbors = n_neighbors
         self.weights = weights
+        self.p = p
+        # FIXME: Currently we never use the kNN model directly without the OOF model. If we would want to do so, we would need logic that excludes train self-samples to avoid data leakage.
 
-        # Initialize internal variables
-        self.model = None
-        self.target_scaler = None
-        self.pipeline = None
-
-    def fit(self, X_in, y_in):
-        X = X_in.copy()
-        y = y_in.copy()
-        # Determine which columns are categorical or numerical
-        categorical_cols = X.select_dtypes(include=['object', 'category']).columns
-        numerical_cols = X.select_dtypes(include=[np.number]).columns
-
-        # Define transformers for preprocessing
-        transformers = [
-            ('num', Pipeline([
-                ('imputer', SimpleImputer(strategy='mean')),
-                ('scaler', StandardScaler())
-            ]), numerical_cols),
-            ('cat', Pipeline([
-                ('imputer', SimpleImputer(strategy='most_frequent')),
-                ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False, max_categories=100))
-            ]), categorical_cols)
-        ]
-
-        # Combine transformations in a ColumnTransformer
-        self.pipeline = ColumnTransformer(transformers)
-
-        # Fit the transformers and transform the data
-        self.pipeline.fit(X)
-        X_transformed = self.pipeline.transform(X) 
-        
         if self.target_type == 'regression':
-            # Standardize the target if regression
-            self.target_scaler = StandardScaler()
-            y_scaled = self.target_scaler.fit_transform(y.values.reshape(-1, 1)).flatten()
-
-            # Fit the regression model (using KNeighborsRegressor)
-            self.model = KNeighborsRegressor(n_neighbors=self.n_neighbors, weights=self.weights)
-            self.model.fit(X_transformed, y_scaled)
-        elif self.target_type in ['binary', 'multiclass']:
-            # Fit the classification model (using KNeighborsClassifier)
-            self.model = KNeighborsClassifier(n_neighbors=self.n_neighbors, weights=self.weights)
-            self.model.fit(X_transformed, y)
-        else:
-            raise ValueError("target_type must be 'regression' or 'classification'")
-
-        return self
-
-    def predict(self, X):
-        # Transform the features using the fitted pipeline
-        X_transformed = self.pipeline.transform(X)
-
-        # Predict based on the model type
-        if self.target_type == 'regression':
-            y_pred_scaled = self.model.predict(X_transformed)
-            y_pred = self.target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
-            return y_pred
+            self.model = KNeighborsRegressor(n_neighbors=self.n_neighbors, weights=self.weights, p=self.p)
         elif self.target_type == 'binary':
-            return self.model.predict_proba(X_transformed)[:, 1]
+            self.model = KNeighborsClassifier(n_neighbors=self.n_neighbors, weights=self.weights, p=self.p)
         elif self.target_type == 'multiclass':
-            return self.model.predict_proba(X_transformed)
+            self.model = KNeighborsClassifier(n_neighbors=self.n_neighbors, weights=self.weights, p=self.p)
         else:
-            raise ValueError("target_type must be 'regression' or 'classification'")
+            raise ValueError("target_type must be 'binary', 'multiclass', or 'regression'")
 
+        import numpy as np
+        from scipy.special import logit
+
+    def decision_function(self, X, eps=1e-15):
+        X_transformed = self.pipeline.transform(X)
+        p = np.clip(self.model.predict_proba(X_transformed), eps, 1-eps)
+
+        if self.target_type == "binary":
+            return logit(p[:, 1])
+
+        # multiclass (OvR)
+        return logit(p)
+
+class OOFCustomKNNModel(OOFCustomModel):
+    def __init__(self, 
+                 target_type,
+                 scaler='squashing',
+                 standardize_target=True,
+                 n_splits:int=5,
+                 random_state:int=42,
+                 n_neighbors:int=20,
+                 weights:str='distance',
+                 p:float=2,
+                 ):
+        base_model_kwargs = {
+            'target_type': target_type,
+            'scaler': scaler,
+            'standardize_target': standardize_target,
+            'n_neighbors': n_neighbors,
+            'weights': weights,
+            'p': p
+        }
+        super().__init__(
+            target_type=target_type,
+            base_model_cls=CustomKNNModel,
+            base_model_kwargs=base_model_kwargs,
+            n_splits=n_splits,
+            random_state=random_state
+        )
+
+# from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
+# class CustomKNNModel(BaseEstimator):
+#     def __init__(self, target_type, standardize_target=True, n_neighbors=1, weights='uniform'):
+#         self.target_type = target_type  # 'regression' or 'classification'
+#         self.standardize_target = standardize_target
+#         self.n_neighbors = n_neighbors
+#         self.weights = weights
+
+#         # Initialize internal variables
+#         self.model = None
+#         self.target_scaler = None
+#         self.pipeline = None
+
+#     def fit(self, X_in, y_in):
+#         X = X_in.copy()
+#         y = y_in.copy()
+#         # Determine which columns are categorical or numerical
+#         categorical_cols = X.select_dtypes(include=['object', 'category']).columns
+#         numerical_cols = X.select_dtypes(include=[np.number]).columns
+
+#         # Define transformers for preprocessing
+#         transformers = [
+#             ('num', Pipeline([
+#                 ('imputer', SimpleImputer(strategy='mean')),
+#                 ('scaler', StandardScaler())
+#             ]), numerical_cols),
+#             ('cat', Pipeline([
+#                 ('imputer', SimpleImputer(strategy='most_frequent')),
+#                 ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False, max_categories=100))
+#             ]), categorical_cols)
+#         ]
+
+#         # Combine transformations in a ColumnTransformer
+#         self.pipeline = ColumnTransformer(transformers)
+
+#         # Fit the transformers and transform the data
+#         self.pipeline.fit(X)
+#         X_transformed = self.pipeline.transform(X) 
+        
+#         if self.target_type == 'regression':
+#             # Standardize the target if regression
+#             self.target_scaler = StandardScaler()
+#             y_scaled = self.target_scaler.fit_transform(y.values.reshape(-1, 1)).flatten()
+
+#             # Fit the regression model (using KNeighborsRegressor)
+#             self.model = KNeighborsRegressor(n_neighbors=self.n_neighbors, weights=self.weights)
+#             self.model.fit(X_transformed, y_scaled)
+#         elif self.target_type in ['binary', 'multiclass']:
+#             # Fit the classification model (using KNeighborsClassifier)
+#             self.model = KNeighborsClassifier(n_neighbors=self.n_neighbors, weights=self.weights)
+#             self.model.fit(X_transformed, y)
+#         else:
+#             raise ValueError("target_type must be 'regression' or 'classification'")
+
+#         return self
+
+#     def predict(self, X):
+#         # Transform the features using the fitted pipeline
+#         X_transformed = self.pipeline.transform(X)
+
+#         # Predict based on the model type
+#         if self.target_type == 'regression':
+#             y_pred_scaled = self.model.predict(X_transformed)
+#             y_pred = self.target_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+#             return y_pred
+#         elif self.target_type == 'binary':
+#             return self.model.predict_proba(X_transformed)[:, 1]
+#         elif self.target_type == 'multiclass':
+#             return self.model.predict_proba(X_transformed)
+#         else:
+#             raise ValueError("target_type must be 'regression' or 'classification'")
+
+
+class OOFModePredictor(OOFCustomModel):
+    def __init__(self, 
+                 target_type,
+                 mode_value,
+                 base_model_cls: BaseEstimator,
+                 base_model_kwargs: dict = None,
+                 n_splits:int=5,
+                 random_state:int=42,
+                 ):
+        self.mode_value = mode_value
+        if base_model_kwargs is None:
+            base_model_kwargs = {'target_type': target_type}
+        if 'target_type' not in base_model_kwargs:
+            base_model_kwargs['target_type'] = target_type
+        super().__init__(
+            target_type=target_type,
+            base_model_cls=base_model_cls,
+            base_model_kwargs=base_model_kwargs,
+            n_splits=n_splits,
+            random_state=random_state
+        )
+        # if self.model_type == 'extra_tree' and self.target_type == 'regression':
+        #     self.model = ExtraTreeRegressor(min_samples_leaf=5, random_state=self.random_state)
+        # elif self.model_type == 'extra_tree' and self.target_type in ['binary', 'multiclass']:
+        #     self.model = ExtraTreeClassifier(min_samples_leaf=5, random_state=self.random_state)
+        # elif self.model_type == 'linear' and self.target_type == 'regression':
+        #     self.model = Lasso(random_state=self.random_state)
+        # elif self.model_type == 'linear' and self.target_type in ['binary', 'multiclass']:
+        #     self.model = LogisticRegression(max_iter=1000, random_state=self.random_state)
+        # else:
+        #     raise ValueError(f"Invalid model_type: {self.model_type}")
+        
+    def fit(self, X_in, y_in):
+        # mode = y_in.value_counts().index[0]
+        # for mode in y.value_counts().index[:10]:
+        #     y_bin = (y == mode).astype(int)
+        #     y_test_bin = (y_test == mode).astype(int)
+
+        y_bin = (y_in == self.mode_value).astype(int)
+        return super().fit(X_in, y_bin)
+    
+from sklearn.tree import ExtraTreeClassifier, ExtraTreeRegressor
+
+class CustomExtraTreeModel(CustomModel):
+    def __init__(self, 
+                 target_type,
+                 min_samples_leaf=5,
+                 ):
+        super().__init__(target_type=target_type)
+        self.min_samples_leaf = min_samples_leaf
+
+        if target_type == 'regression':
+            self.model = ExtraTreeRegressor(min_samples_leaf=self.min_samples_leaf)
+        elif target_type in ['binary', 'multiclass']:
+            self.model = ExtraTreeClassifier(min_samples_leaf=self.min_samples_leaf)
+        else:
+            raise ValueError("target_type must be 'binary', 'multiclass', or 'regression'")
+
+    # def fit(self, X, y):
+    #     self.model.fit(X, y)
+    #     return self
+
+    # def predict(self, X):
+    #     if self.target_type in ['binary', 'multiclass']:
+    #         return self.model.predict_proba(X)
+    #     return self.model.predict(X)
+
+    # def decision_function(self, X):
+    #     if self.target_type == 'binary':
+    #         proba = self.model.predict_proba(X)
+    #         return logit(proba[:, 1])
+    #     elif self.target_type == 'multiclass':
+    #         proba = self.model.predict_proba(X)
+    #         return logit(proba)
+    #     else:
+    #         raise ValueError("decision_function is only available for 'binary' or 'multiclass' target types")

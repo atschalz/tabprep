@@ -5,7 +5,7 @@ from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.pipeline import Pipeline
 
 from tabprep.proxy_models import TargetMeanClassifier, TargetMeanRegressor, UnivariateLinearRegressor, UnivariateLogisticClassifier, PolynomialRegressor, PolynomialLogisticClassifier, \
-    LightGBMBinner, KMeansBinner, CustomLinearModel, TargetMeanClassifierCut, TargetMeanRegressorCut
+    LightGBMBinner, KMeansBinner, TargetMeanClassifierCut, TargetMeanRegressorCut
 from tabprep.utils.modeling_utils import adapt_lgb_params, adjust_target_format, make_cv_function, clean_feature_names
 
 from sklearn.impute import SimpleImputer
