@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from tabprep.detectors.base_preprocessor import BasePreprocessor as old_base
-from category_encoders.leave_one_out import LeaveOneOutEncoder
+# from category_encoders.leave_one_out import LeaveOneOutEncoder
 from sklearn.preprocessing import TargetEncoder
 from tabprep.preprocessors.frequency import FrequencyEncoder
 from autogluon.features.generators.drop_duplicates import DropDuplicatesFeatureGenerator
@@ -185,14 +185,14 @@ class CatIntAdder(old_base):
                     drop_cols.append(col)
                     self.new_col_set.remove(col)
                     X_new = X_new.drop(columns=drop_cols, errors='ignore')
-                else:
-                    loo_new = LeaveOneOutEncoder().fit_transform(X_new[[col]], y)
-                    loo_old = LeaveOneOutEncoder().fit_transform(X_use[col.split('_&_')], y)
-                    target_mean_diff[col] = loo_old.corrwith(loo_new[col], method='spearman').max()
-                    if target_mean_diff[col] >0.95:
-                        drop_cols.append(col)
-                        self.new_col_set.remove(col)
-                        X_new = X_new.drop(columns=drop_cols, errors='ignore')
+                # else:
+                #     loo_new = LeaveOneOutEncoder().fit_transform(X_new[[col]], y)
+                #     loo_old = LeaveOneOutEncoder().fit_transform(X_use[col.split('_&_')], y)
+                #     target_mean_diff[col] = loo_old.corrwith(loo_new[col], method='spearman').max()
+                #     if target_mean_diff[col] >0.95:
+                #         drop_cols.append(col)
+                #         self.new_col_set.remove(col)
+                #         X_new = X_new.drop(columns=drop_cols, errors='ignore')
             
             X_new = X_new.drop(columns=drop_cols, errors='ignore')
         
@@ -387,66 +387,66 @@ class OneHotPreprocessor(CategoricalBasePreprocessor):
         unaffected_columns_ = X.drop(columns=affected_columns_).columns.tolist()
         return affected_columns_, unaffected_columns_
     
-class CatLOOTransformer(CategoricalBasePreprocessor):
-    """
-    Transform all object/category columns using Leave-One-Out encoding.
-    Keeps non-categorical columns unchanged and returns a pandas DataFrame.
+# class CatLOOTransformer(CategoricalBasePreprocessor):
+#     """
+#     Transform all object/category columns using Leave-One-Out encoding.
+#     Keeps non-categorical columns unchanged and returns a pandas DataFrame.
 
-    Parameters
-    ----------
-    sigma : float, default=0.0
-        Standard deviation of Gaussian noise added to encoding.
-    random_state : int, optional
-        Random seed for noise.
-    """
-    def __init__(self, 
-                 keep_original: bool = False,
-                 sigma: float = 0.0, 
-                 random_state: int | None = None,
-                 **kwargs
-                 ):
-        super().__init__(keep_original=keep_original)
-        self.sigma = sigma
-        self.random_state = random_state
-        self.__name__ = "CatLOOTransformer"
+#     Parameters
+#     ----------
+#     sigma : float, default=0.0
+#         Standard deviation of Gaussian noise added to encoding.
+#     random_state : int, optional
+#         Random seed for noise.
+#     """
+#     def __init__(self, 
+#                  keep_original: bool = False,
+#                  sigma: float = 0.0, 
+#                  random_state: int | None = None,
+#                  **kwargs
+#                  ):
+#         super().__init__(keep_original=keep_original)
+#         self.sigma = sigma
+#         self.random_state = random_state
+#         self.__name__ = "CatLOOTransformer"
 
-    def _fit(self, X_in: pd.DataFrame, y_in: pd.Series):
-        X = X_in.copy()
-        y = y_in.copy()
+#     def _fit(self, X_in: pd.DataFrame, y_in: pd.Series):
+#         X = X_in.copy()
+#         y = y_in.copy()
 
-        if y is None:
-            raise ValueError("Leave-One-Out encoding requires a target variable `y`.")
+#         if y is None:
+#             raise ValueError("Leave-One-Out encoding requires a target variable `y`.")
 
-        # Fit Leave-One-Out encoder
-        self.loo_ = LeaveOneOutEncoder(
-            cols=list(X.columns),
-            sigma=self.sigma,
-            random_state=self.random_state
-        )
+#         # Fit Leave-One-Out encoder
+#         self.loo_ = LeaveOneOutEncoder(
+#             cols=list(X.columns),
+#             sigma=self.sigma,
+#             random_state=self.random_state
+#         )
 
-        self.modes = X.mode().iloc[0]
+#         self.modes = X.mode().iloc[0]
 
-        for col in X.columns:
-            if X[col].isna().sum()>0:
-                X[col] = X[col].fillna(self.modes[col])
+#         for col in X.columns:
+#             if X[col].isna().sum()>0:
+#                 X[col] = X[col].fillna(self.modes[col])
 
-        # TODO: Implement for multi-class
-        if y.nunique()==2:
-            self.loo_.fit(X, (y==y.iloc[0]).astype(float))
-        else:
-            self.loo_.fit(X, y.astype(float))
+#         # TODO: Implement for multi-class
+#         if y.nunique()==2:
+#             self.loo_.fit(X, (y==y.iloc[0]).astype(float))
+#         else:
+#             self.loo_.fit(X, y.astype(float))
 
-        return self
+#         return self
 
-    def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
-        X_out = X_in.copy()
-        for col in X_out.columns:
-            if X_out[col].isna().sum()>0:
-                X_out[col] = X_out[col].fillna(self.modes[col])
-        X_out = self.loo_.transform(X_out)
-        X_out.columns = [i + '_LOO' for i in X_out.columns]
+#     def _transform(self, X_in: pd.DataFrame, **kwargs) -> pd.DataFrame:
+#         X_out = X_in.copy()
+#         for col in X_out.columns:
+#             if X_out[col].isna().sum()>0:
+#                 X_out[col] = X_out[col].fillna(self.modes[col])
+#         X_out = self.loo_.transform(X_out)
+#         X_out.columns = [i + '_LOO' for i in X_out.columns]
 
-        return X_out
+#         return X_out
     
 class TargetEncodingTransformer(CategoricalBasePreprocessor):
     """

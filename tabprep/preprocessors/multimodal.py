@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 from tabprep.detectors.base_preprocessor import BasePreprocessor as old_base
-from category_encoders.leave_one_out import LeaveOneOutEncoder
 from sklearn.preprocessing import TargetEncoder
 from tabprep.preprocessors.frequency import FrequencyEncoder
 from autogluon.features.generators.drop_duplicates import DropDuplicatesFeatureGenerator

@@ -9,7 +9,7 @@ from sklearn.pipeline import Pipeline
 
 from typing import Literal, Optional, Dict, Any
 from collections import Counter
-from category_encoders import LeaveOneOutEncoder
+# from category_encoders import LeaveOneOutEncoder
 
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
@@ -335,41 +335,41 @@ class DuplicateCountAdder(NumericBasePreprocessor):
         X_out = pd.DataFrame(new_feat)
         return X_out
 
-class DuplicateSampleLOOEncoder(BasePreprocessor):
-    def __init__(
-        self, new_name='LOO_duplicates',
-        **kwargs
-    ):
-        super().__init__(keep_original=True)
-        self.new_col = new_name
+# class DuplicateSampleLOOEncoder(BasePreprocessor):
+#     def __init__(
+#         self, new_name='LOO_duplicates',
+#         **kwargs
+#     ):
+#         super().__init__(keep_original=True)
+#         self.new_col = new_name
 
-    def _fit(self, X, y):
-        X_str = X.astype(str).sum(axis=1)
+#     def _fit(self, X, y):
+#         X_str = X.astype(str).sum(axis=1)
 
-        self.u_id_map = {i:j for i,j in zip(X_str.unique(),list(range(X_str.nunique())))}
+#         self.u_id_map = {i:j for i,j in zip(X_str.unique(),list(range(X_str.nunique())))}
 
-        X_uid = pd.DataFrame(X_str.map(self.u_id_map).astype(str))
+#         X_uid = pd.DataFrame(X_str.map(self.u_id_map).astype(str))
 
-        self.loo = LeaveOneOutEncoder()
-        if y.nunique()==2:
-            self.loo.fit(X_uid, (y==y.iloc[0]).astype(float))
-        else:
-            self.loo.fit(X_uid, y.astype(float))
+#         self.loo = LeaveOneOutEncoder()
+#         if y.nunique()==2:
+#             self.loo.fit(X_uid, (y==y.iloc[0]).astype(float))
+#         else:
+#             self.loo.fit(X_uid, y.astype(float))
 
-        return self
+#         return self
 
-    def _transform(self, X, **kwargs):
-        X_out = X.copy()
-        X_str = X.astype(str).sum(axis=1)
-        X_uid = pd.DataFrame(X_str.map(self.u_id_map).astype(str))
-        X_out = pd.DataFrame(self.loo.transform(X_uid), index=X.index) 
-        X_out.columns = [self.new_col]
-        return X_out
+#     def _transform(self, X, **kwargs):
+#         X_out = X.copy()
+#         X_str = X.astype(str).sum(axis=1)
+#         X_uid = pd.DataFrame(X_str.map(self.u_id_map).astype(str))
+#         X_out = pd.DataFrame(self.loo.transform(X_uid), index=X.index) 
+#         X_out.columns = [self.new_col]
+#         return X_out
     
-    def _get_affected_columns(self, X: pd.DataFrame):
-        affected_columns_ = X.columns.tolist()
-        unaffected_columns_ = []
-        return affected_columns_, unaffected_columns_
+#     def _get_affected_columns(self, X: pd.DataFrame):
+#         affected_columns_ = X.columns.tolist()
+#         unaffected_columns_ = []
+#         return affected_columns_, unaffected_columns_
 
 @dataclass
 class _CatSpec:

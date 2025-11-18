@@ -7,7 +7,7 @@ from tabprep.utils.modeling_utils import make_cv_function
 from tabprep.utils.eval_utils import p_value_wilcoxon_greater_than_zero
 from tabprep.proxy_models import TargetMeanRegressor, TargetMeanClassifier
 from itertools import product, combinations
-from category_encoders import LeaveOneOutEncoder
+# from category_encoders import LeaveOneOutEncoder
 from sklearn.metrics import roc_auc_score, root_mean_squared_error
 from tabprep.detectors.base_preprocessor import BasePreprocessor
 from sklearn.dummy import DummyClassifier, DummyRegressor
@@ -109,32 +109,32 @@ class GroupByFeatureEngineer(BasePreprocessor):
         self.base_cat_cols = []
 
 
-    def leave_one_out_test(self, X, y):
-        if self.target_type in ['binary', 'multiclass']:
-            dummy = DummyClassifier(strategy='prior')
-            metric = roc_auc_score
-        elif self.target_type == 'regression':
-            dummy = DummyRegressor(strategy='mean')
-            metric = lambda x,y: -root_mean_squared_error(x, y)
+    # def leave_one_out_test(self, X, y):
+    #     if self.target_type in ['binary', 'multiclass']:
+    #         dummy = DummyClassifier(strategy='prior')
+    #         metric = roc_auc_score
+    #     elif self.target_type == 'regression':
+    #         dummy = DummyRegressor(strategy='mean')
+    #         metric = lambda x,y: -root_mean_squared_error(x, y)
 
-        # X_use = X.copy()
-        loo_cols = []
-        self.loo_scores = {}
-        for cnum, col in enumerate(X.columns):                
-            print(f"\rLeave-One-Out test: {cnum+1}/{len(X.columns)} columns processed", end="", flush=True)
-            if cnum==0:
-                dummy_pred = dummy.fit(X[[col]], y).predict(X[[col]])
-                dummy_score = metric(y, dummy_pred)
+    #     # X_use = X.copy()
+    #     loo_cols = []
+    #     self.loo_scores = {}
+    #     for cnum, col in enumerate(X.columns):                
+    #         print(f"\rLeave-One-Out test: {cnum+1}/{len(X.columns)} columns processed", end="", flush=True)
+    #         if cnum==0:
+    #             dummy_pred = dummy.fit(X[[col]], y).predict(X[[col]])
+    #             dummy_score = metric(y, dummy_pred)
 
-            loo_pred = LeaveOneOutEncoder().fit_transform(X[col].astype('category'), y)[col]
-            self.loo_scores[col] = metric(y, loo_pred)
+    #         loo_pred = LeaveOneOutEncoder().fit_transform(X[col].astype('category'), y)[col]
+    #         self.loo_scores[col] = metric(y, loo_pred)
 
-            if self.loo_scores[col] < dummy_score:
-                loo_cols.append(col)
+    #         if self.loo_scores[col] < dummy_score:
+    #             loo_cols.append(col)
 
-        remaining_cols = [x for x in X.columns if x not in loo_cols]
+    #     remaining_cols = [x for x in X.columns if x not in loo_cols]
 
-        return remaining_cols
+    #     return remaining_cols
 
     def filter_combinations(self, X_in, **kwargs):
         X = X_in.copy()
