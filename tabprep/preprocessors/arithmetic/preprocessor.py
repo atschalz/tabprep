@@ -2,7 +2,6 @@ from tabprep.preprocessors.arithmetic.combinations import *
 from tabprep.preprocessors.arithmetic.filtering import *
 from tabprep.preprocessors.arithmetic.memory import *
 from tabprep.preprocessors.base import BasePreprocessor
-import numexpr as ne
 import re
 
 from time import perf_counter
@@ -86,6 +85,8 @@ class ArithmeticPreprocessor(BasePreprocessor):
         self.new_feats = []
 
     def spearman_selection(self, X, y):
+        # FIXME: Currently heavily relies on polars for performance, make sure a numpy and a polars version exists for each function
+        from tabprep.preprocessors.arithmetic.filtering_polars import filter_spearman_pl_from_pandas, get_target_corr, filter_cross_correlation
         ### Apply advanced filtering steps (spearman correlation thresholding)
         # TODO: Might skip that and instead add the corr based filter to basic + use a max_base_features parameter
         with self.timelog.block("advanced_filter_base"):
@@ -99,7 +100,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
 
         if self.use_target_corr:
             with self.timelog.block("target_corr_base"):
-                target_corr = get_target_corr(X, y, top_k=5, use_polars=True)
+                target_corr = get_target_corr(X, y, top_k=5, use_polars=False)
             print("Top base feature correlations:")
             print(target_corr)
 
@@ -123,7 +124,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
 
             if self.use_target_corr:
                 with self.timelog.block(f"target_corr_{order}-order"):
-                    target_corr = get_target_corr(X_int_higher, y, top_k=5, use_polars=True)
+                    target_corr = get_target_corr(X_int_higher, y, top_k=5, use_polars=False)
                 print(f"Top {order}-order interaction feature correlations:")
                 print(target_corr)
 
@@ -131,7 +132,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
             n_feats_start = X_int_higher.shape[1]
             # basic
             with self.timelog.block(f"basic_filter_{order}-order"):
-                X_int_higher = basic_filter(X_int_higher, use_polars=True, min_cardinality=self.min_cardinality)
+                X_int_higher = basic_filter(X_int_higher, use_polars=False, min_cardinality=self.min_cardinality)
             print(f"Using {len(X_int_higher.columns)}/{n_feats_start} features after basic filtering")
 
             # based on correlations among interaction features
@@ -154,7 +155,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
                 print(f"Using {len(use_cols)}/{n_feats_start} features after cross-correlation filtering")
 
             if self.use_target_corr:
-                target_corr = get_target_corr(X_int_higher, y, top_k=5, use_polars=True)
+                target_corr = get_target_corr(X_int_higher, y, top_k=5, use_polars=False)
                 print(f"Top {order}-order interaction feature correlations after filtering:")
                 print(target_corr)
 
@@ -224,7 +225,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
         ### Apply basic filtering steps
         n_base_feats_start = X.shape[1]
         with self.timelog.block("basic_filter_base"):
-            X = basic_filter(X, use_polars=True, min_cardinality=self.min_cardinality) # TODO: Make data adaptive and use more restrictive threshold for large datasets
+            X = basic_filter(X, use_polars=False, min_cardinality=self.min_cardinality) # TODO: Make data adaptive and use more restrictive threshold for large datasets
         print(f"Using {len(X.columns)}/{n_base_feats_start} features after basic filtering")
         if X.shape[1] > self.max_base_feats:
             print(f"Limiting base features to {self.max_base_feats} (from {X.shape[1]})")
@@ -280,8 +281,8 @@ class ArithmeticPreprocessor(BasePreprocessor):
 if __name__ == "__main__":
 
     import openml
-    from tabrepo.benchmark.task.openml import OpenMLTaskWrapper
-    from tabrepo.nips2025_utils.fetch_metadata import load_task_metadata
+    from tabarena.benchmark.task.openml import OpenMLTaskWrapper
+    from tabarena.nips2025_utils.fetch_metadata import load_task_metadata
     from tabprep.utils.modeling_utils import adjust_target_format
 
     metadata = load_task_metadata()
