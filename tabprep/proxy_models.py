@@ -1043,7 +1043,7 @@ class CustomModel(BaseEstimator):
         elif scaler == 'squashing':
             self.scaler = SquashingScaler()
         elif scaler is None:
-            self.scaler = None
+            self.scaler = 'passthrough'
         else:
             raise ValueError("scaler must be 'standard', 'quantile-normal', 'quantile-uniform', 'squashing', or None")
 
@@ -1620,3 +1620,58 @@ class CustomExtraTreeModel(CustomModel):
     #         return logit(proba)
     #     else:
     #         raise ValueError("decision_function is only available for 'binary' or 'multiclass' target types")
+
+
+### Init score functionality
+
+class OOFLinearInitScore(OOFCustomLinearModel):
+    def __init__(self, target_type: str, init_kwargs=dict(), **lin_kwargs):
+        super().__init__(target_type=target_type, **init_kwargs, **lin_kwargs)
+
+    def init_score(self, X_in, is_train=False, **kwargs):
+        X = X_in.copy()
+
+        if self.target_type == "regression":
+            return self.predict(X, is_train=is_train)
+        else:
+            return self.decision_function(X, is_train=is_train)
+        
+class OOFKNNInitScore(OOFCustomKNNModel):
+    def __init__(self, target_type: str, init_kwargs=dict(), **lin_kwargs):
+        super().__init__(target_type=target_type, **init_kwargs, **lin_kwargs)
+
+    def init_score(self, X_in, is_train=False, **kwargs):
+        X = X_in.copy()
+
+        if self.target_type == "regression":
+            return self.predict(X, is_train=is_train)
+        else:
+            return self.decision_function(X, is_train=is_train)
+
+class LinearInitScore(CustomLinearModel):
+    def __init__(self, target_type: str, init_kwargs=dict(), **lin_kwargs):
+        super().__init__(target_type=target_type, **init_kwargs, **lin_kwargs)
+
+    def init_score(self, X_in, **kwargs):
+        X = X_in.copy()
+
+        if self.model is None:
+            raise RuntimeError("call .fit(...) first")
+
+        if self.target_type == "regression":
+            return self.predict(X)
+        else:
+            return self.decision_function(X)
+
+class GroupedLinearInitScore(GroupedCustomLinearModel):
+    def __init__(self, target_type: str, **lin_kwargs):
+        super().__init__(target_type=target_type, **lin_kwargs)
+    
+    def init_score(self, X_in, **kwargs):
+        X = X_in.copy()
+
+        if self.target_type == "regression":
+            return self.predict(X)
+
+        raw = self.decision_function(X)
+        return raw
