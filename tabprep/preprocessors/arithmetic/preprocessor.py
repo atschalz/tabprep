@@ -19,12 +19,12 @@ class TimerLog:
         finally:
             dt = perf_counter() - t0
             self.times[name] = self.times.get(name, 0) + dt
-            print(f"[{name}] {dt:.3f}s")
 
-    def summary(self):
-        print("\n--- Timing Summary (in order) ---")
-        for name, total in self.times.items():
-            print(f"{name:<20} {total:.3f}s")
+    def summary(self, verbose=False):
+        if verbose:
+            print("\n--- Timing Summary (in order) ---")
+            for name, total in self.times.items():
+                print(f"{name:<20} {total:.3f}s")
         return dict(self.times)
 
 def remove_same_range_features(X, x):
@@ -48,7 +48,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
 
         # Efficiency parameters
         subsample: int = 100000,  # TODO: Need to implement
-        reduce_memory_usage: bool = True,
+        reduce_memory: bool = True,
         rescale_avoid_overflow: bool = True,
 
         # Filtering parameters
@@ -61,6 +61,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
         # Additional variation
         # scale_X: bool = False,
         # add_unary: bool = False,
+        verbose: bool = False,
         **kwargs
         ):
         super().__init__(keep_original=True)
@@ -71,13 +72,14 @@ class ArithmeticPreprocessor(BasePreprocessor):
         self.max_new_feats = max_new_feats
         self.selection_method = selection_method
         self.subsample = subsample
-        self.reduce_memory_usage = reduce_memory_usage
+        self.reduce_memory = reduce_memory
         self.rescale_avoid_overflow = rescale_avoid_overflow
         self.corr_threshold = corr_threshold
         self.use_cross_corr = use_cross_corr
         self.use_target_corr = use_target_corr
         self.cross_corr_n_block_size = cross_corr_n_block_size
         self.max_accept_for_pairwise = max_accept_for_pairwise
+        self.verbose = verbose
 
         self.rng = np.random.default_rng(random_state)
 
@@ -90,61 +92,72 @@ class ArithmeticPreprocessor(BasePreprocessor):
         ### Apply advanced filtering steps (spearman correlation thresholding)
         # TODO: Might skip that and instead add the corr based filter to basic + use a max_base_features parameter
         with self.timelog.block("advanced_filter_base"):
-            use_cols = filter_spearman_pl_from_pandas(X, corr_threshold=self.corr_threshold, verbose=True)
-        print(f"Using {len(use_cols)}/{X.shape[1]} features after advanced filtering")
+            use_cols = filter_spearman_pl_from_pandas(X, corr_threshold=self.corr_threshold, verbose=self.verbose)
+            
+        if self.verbose:
+            print(f"Using {len(use_cols)}/{X.shape[1]} features after advanced filtering")
         X = X[use_cols]
 
         if X.shape[1] == 0:
-            print("No features left after filtering. Exiting.")
+            if self.verbose:
+                print("No features left after filtering. Exiting.")
             return self
 
         if self.use_target_corr:
             with self.timelog.block("target_corr_base"):
                 target_corr = get_target_corr(X, y, top_k=5, use_polars=False)
-            print("Top base feature correlations:")
-            print(target_corr)
+            if self.verbose:
+                print("Top base feature correlations:")
+                print(target_corr)
 
         for order in range(2, self.max_order+1):
             if order > X.shape[1]:
                 break
-            print('---' * 20)
-            print(f"Generating order {order} interaction features")
+            if self.verbose:
+                print('---' * 20)
+                print(f"Generating order {order} interaction features")
 
             # 6. Generate higher-order interaction features
             with self.timelog.block(f"get_interactions_{order}-order"):
                 if order == 2:
-                    X_int_higher = get_all_bivariate_interactions(X, order=2, max_base_interactions=int(self.max_accept_for_pairwise / 5))
+                    X_int_higher = get_all_bivariate_interactions(X, order=2, max_base_interactions=int(self.max_accept_for_pairwise / 5), random_state=self.rng)
                     X_int = X.copy()
                 else:
-                    X_int_higher = add_higher_interaction(X, X_int, max_base_interactions=int(self.max_accept_for_pairwise / 5))
+                    X_int_higher = add_higher_interaction(X, X_int, max_base_interactions=int(self.max_accept_for_pairwise / 5), random_state=self.rng)
 
-            with self.timelog.block(f"reduce_memory_{order}-order"):
-                X_int_higher = reduce_memory_usage(X_int_higher, verbose=True, rescale=False)
-            print(f"Generated {X_int_higher.shape[1]} {order}-order interaction features")
+            if self.reduce_memory:
+                with self.timelog.block(f"reduce_memory_{order}-order"):
+                    X_int_higher = reduce_memory_usage(X_int_higher, rescale=False, verbose=self.verbose)
+            if self.verbose:
+                print(f"Generated {X_int_higher.shape[1]} {order}-order interaction features")
 
             if self.use_target_corr:
                 with self.timelog.block(f"target_corr_{order}-order"):
                     target_corr = get_target_corr(X_int_higher, y, top_k=5, use_polars=False)
-                print(f"Top {order}-order interaction feature correlations:")
-                print(target_corr)
+                if self.verbose:
+                    print(f"Top {order}-order interaction feature correlations:")
+                    print(target_corr)
 
             # 7. Filter higher-order interaction features
             n_feats_start = X_int_higher.shape[1]
             # basic
             with self.timelog.block(f"basic_filter_{order}-order"):
                 X_int_higher = basic_filter(X_int_higher, use_polars=False, min_cardinality=self.min_cardinality)
-            print(f"Using {len(X_int_higher.columns)}/{n_feats_start} features after basic filtering")
+            if self.verbose:
+                print(f"Using {len(X_int_higher.columns)}/{n_feats_start} features after basic filtering")
 
             # based on correlations among interaction features
             if X_int_higher.shape[1] > self.max_accept_for_pairwise:
-                print(f"Limiting interaction features to {self.max_accept_for_pairwise} (from {X_int_higher.shape[1]})")
+                if self.verbose:
+                    print(f"Limiting interaction features to {self.max_accept_for_pairwise} (from {X_int_higher.shape[1]})")
                 X_int_higher = X_int_higher.sample(n=self.max_accept_for_pairwise, random_state=42, axis=1)
 
             n_feats_start = X_int_higher.shape[1]
             with self.timelog.block(f"spearman_int_filter_{order}-order"):
                 use_cols = filter_spearman_pl_from_pandas(X_int_higher, corr_threshold=self.corr_threshold, verbose=True)
             X_int_higher = X_int_higher[use_cols]
-            print(f"Using {len(use_cols)}/{n_feats_start} features after interaction feature correlation filtering")
+            if self.verbose:
+                print(f"Using {len(use_cols)}/{n_feats_start} features after spearman filtering")
 
             # based on cross-correlation with base features
             if self.use_cross_corr:
@@ -152,46 +165,52 @@ class ArithmeticPreprocessor(BasePreprocessor):
                 with self.timelog.block(f"cross_correlation_{order}-order"):
                     use_cols = filter_cross_correlation(X_int, X_int_higher, corr_threshold=self.corr_threshold, block_size=self.cross_corr_n_block_size)
                 X_int_higher = X_int_higher[use_cols]
-                print(f"Using {len(use_cols)}/{n_feats_start} features after cross-correlation filtering")
+                if self.verbose:
+                    print(f"Using {len(use_cols)}/{n_feats_start} features after cross-correlation filtering")
 
             if self.use_target_corr:
                 target_corr = get_target_corr(X_int_higher, y, top_k=5, use_polars=False)
-                print(f"Top {order}-order interaction feature correlations after filtering:")
-                print(target_corr)
+                if self.verbose:
+                    print(f"Top {order}-order interaction feature correlations after filtering:")
+                    print(target_corr)
 
             X_int = X_int_higher # pd.concat([X_int, X_int_higher], axis=1)
 
             self.new_feats.extend(use_cols)
 
             if len(self.new_feats) >= self.max_new_feats:
-                print(f"Reached max new features limit of {self.max_new_feats}. Stopping.")
+                if self.verbose:
+                    print(f"Reached max new features limit of {self.max_new_feats}. Stopping.")
                 break
 
     def random_selection(self, X, y):
         for order in range(2, self.max_order+1):
             if order > X.shape[1]:
                 break
-            print('---' * 20)
-            print(f"Generating order {order} interaction features")
+            if self.verbose:
+                print('---' * 20)
+                print(f"Generating order {order} interaction features")
 
             # 6. Generate higher-order interaction features
             with self.timelog.block(f"get_interactions_{order}-order"):
                 if order == 2:
-                    X_int_higher = get_all_bivariate_interactions(X, order=2, max_base_interactions=int(self.max_new_feats/5))
+                    X_int_higher = get_all_bivariate_interactions(X, order=2, max_base_interactions=int(self.max_new_feats/5), random_state=self.rng)
                     X_int = X.copy()
                 else:
-                    X_int_higher = add_higher_interaction(X, X_int, max_base_interactions=int(self.max_new_feats/5))
+                    X_int_higher = add_higher_interaction(X, X_int, max_base_interactions=int(self.max_new_feats/5), random_state=self.rng)
 
             with self.timelog.block(f"reduce_memory_{order}-order"):
-                X_int_higher = reduce_memory_usage(X_int_higher, verbose=True, rescale=False)
-            print(f"Generated {X_int_higher.shape[1]} {order}-order interaction features")
+                X_int_higher = reduce_memory_usage(X_int_higher, rescale=False, verbose=self.verbose)
+            if self.verbose:
+                print(f"Generated {X_int_higher.shape[1]} {order}-order interaction features")
 
             X_int = X_int_higher # pd.concat([X_int, X_int_higher], axis=1)
 
             self.new_feats.extend(X_int_higher.columns.tolist())
 
             if len(self.new_feats) >= self.max_new_feats:
-                print(f"Reached max new features limit of {self.max_new_feats}. Stopping.")
+                if self.verbose:
+                    print(f"Reached max new features limit of {self.max_new_feats}. Stopping.")
                 break
 
     def _fit(self, X_in, y_in = None, **kwargs):
@@ -208,9 +227,9 @@ class ArithmeticPreprocessor(BasePreprocessor):
         y = y.reset_index(drop=True) if y is not None else None
 
         ### Reduce memory usage
-        if self.reduce_memory_usage:
+        if self.reduce_memory:
             with self.timelog.block("reduce_memory_usage_base"):
-                X = reduce_memory_usage(X, verbose=True, rescale=self.rescale_avoid_overflow)
+                X = reduce_memory_usage(X, rescale=self.rescale_avoid_overflow, verbose=self.verbose)
 
         ### if categorical-as-numerical is enabled, convert categorical features to numerical
         if self.cat_as_num:
@@ -219,16 +238,19 @@ class ArithmeticPreprocessor(BasePreprocessor):
         else: 
             X = X.select_dtypes(include=[np.number])
             if X.shape[1]==0:
-                print('No numeric features available. Exiting.')
+                if self.verbose:
+                    print('No numeric features available. Exiting.')
                 return self
 
         ### Apply basic filtering steps
         n_base_feats_start = X.shape[1]
         with self.timelog.block("basic_filter_base"):
             X = basic_filter(X, use_polars=False, min_cardinality=self.min_cardinality) # TODO: Make data adaptive and use more restrictive threshold for large datasets
-        print(f"Using {len(X.columns)}/{n_base_feats_start} features after basic filtering")
+        if self.verbose:
+            print(f"Using {len(X.columns)}/{n_base_feats_start} features after basic filtering")
         if X.shape[1] > self.max_base_feats:
-            print(f"Limiting base features to {self.max_base_feats} (from {X.shape[1]})")
+            if self.verbose:
+                print(f"Limiting base features to {self.max_base_feats} (from {X.shape[1]})")
             X = X.sample(n=self.max_base_feats, random_state=42, axis=1)
         self.used_base_cols = X.columns.tolist()
 
@@ -239,7 +261,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
 
         # self.new_feats_compiled = [e.replace('_/_', '/').replace('_*_', '*').replace('_+_', '+').replace('_-_', '-') for e in self.new_feats]
         self._compile_expressions() # Assumes that self.new_feats is populated
-        self.time_logs = self.timelog.summary()
+        self.time_logs = self.timelog.summary(verbose=self.verbose)
         return self
     
     def _compile_expressions(self):
