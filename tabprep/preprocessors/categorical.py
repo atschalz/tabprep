@@ -79,6 +79,7 @@ class CatIntAdder(old_base):
                  fillna: int = 0,
                  log: bool = False,
                  max_base_interactions=100,
+                 random_state: int = 42,
                  **kwargs
                  ):
         super().__init__(target_type=target_type)
@@ -97,6 +98,8 @@ class CatIntAdder(old_base):
         self.log = log
         self.max_base_interactions = max_base_interactions
 
+        self.rng = np.random.default_rng(random_state)
+
         self.new_dtypes = {}
         self.infreq_merger = InfrequentCategoryMerger(min_count=self.min_count)
 
@@ -110,7 +113,7 @@ class CatIntAdder(old_base):
         feat_combs_use_arr = np.array(feat_combs_use)
 
         if len(feat_combs_use_arr) > max_base_interactions:
-            feat_combs_use_arr = feat_combs_use_arr[np.random.choice(len(feat_combs_use_arr), max_base_interactions, replace=False)].T
+            feat_combs_use_arr = feat_combs_use_arr[self.rng.choice(len(feat_combs_use_arr), max_base_interactions, replace=False)].T
         else:
             feat_combs_use_arr = feat_combs_use_arr.T
 
