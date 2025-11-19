@@ -1006,6 +1006,7 @@ class CustomModel(BaseEstimator):
                  standardize_target=True,
                  cat_method:Literal['ohe','oof-te']='ohe',
                  scale_binary:bool=True,
+                 random_state:int=42,
                  **kwargs
                  ):
 
@@ -1013,6 +1014,7 @@ class CustomModel(BaseEstimator):
         self.standardize_target = standardize_target
         self.cat_method = cat_method
         self.scale_binary = scale_binary
+        self.random_state = random_state
         
         if self.target_type == 'regression' and self.standardize_target:
             self.target_scaler = StandardScaler()
@@ -1025,7 +1027,7 @@ class CustomModel(BaseEstimator):
         self.model: BaseEstimator = None
         if self.cat_method == 'oof-te':
             from tabprep.preprocessors.categorical import OOFTargetEncoder
-            self.oof_te = OOFTargetEncoder(target_type=self.target_type, keep_original=False, alpha=10.)
+            self.oof_te = OOFTargetEncoder(target_type=self.target_type, keep_original=False, alpha=10., random_state=self.random_state)
         else:
             self.oof_te = None
 
@@ -1034,10 +1036,10 @@ class CustomModel(BaseEstimator):
             self.scaler = StandardScaler()
         elif scaler == 'quantile-normal':
             from sklearn.preprocessing import QuantileTransformer
-            self.scaler = QuantileTransformer(output_distribution='normal')
+            self.scaler = QuantileTransformer(output_distribution='normal', random_state=self.random_state)
         elif scaler == 'quantile-uniform':
             from sklearn.preprocessing import QuantileTransformer
-            self.scaler = QuantileTransformer(output_distribution='uniform')
+            self.scaler = QuantileTransformer(output_distribution='uniform', random_state=self.random_state)
         elif scaler == 'squashing':
             self.scaler = SquashingScaler()
         elif scaler == 'squashing':
@@ -1217,12 +1219,14 @@ class CustomLinearModel(CustomModel):
                  scale_binary=True,
                  linear_model_type='lasso',    # linear, lasso, ridge
                  lambda_: Literal['low', 'medium', 'high', float] = 'medium', # single regularization strength param
-                 max_degree: int = 1
+                 max_degree: int = 1,
+                 random_state:int=42,
                  ):
-        super().__init__(target_type=target_type, scaler=scaler, standardize_target=standardize_target, cat_method=cat_method, scale_binary=scale_binary)
+        super().__init__(target_type=target_type, scaler=scaler, standardize_target=standardize_target, cat_method=cat_method, scale_binary=scale_binary, random_state=random_state)
 
         self.linear_model_type = linear_model_type
         self.max_degree = max_degree
+        self.random_state = random_state
 
         if isinstance(lambda_, str):
             self.lambda_ = self.set_lambda_from_category(cat=lambda_)
@@ -1231,11 +1235,11 @@ class CustomLinearModel(CustomModel):
 
         if self.target_type == 'regression':
             if self.linear_model_type == 'linear':
-                self.model = LinearRegression()
+                self.model = LinearRegression(random_state=self.random_state)
             elif self.linear_model_type == 'lasso':
-                self.model = Lasso(alpha=self.lambda_)   # λ ↑ ⇒ more reg
+                self.model = Lasso(alpha=self.lambda_, random_state=self.random_state)   # λ ↑ ⇒ more reg
             elif self.linear_model_type == 'ridge':
-                self.model = Ridge(alpha=self.lambda_)   # λ ↑ ⇒ more reg
+                self.model = Ridge(alpha=self.lambda_, random_state=self.random_state)   # λ ↑ ⇒ more reg
             else:
                 raise ValueError("linear_model_type must be 'linear', 'lasso', or 'ridge'")
 
@@ -1267,7 +1271,7 @@ class CustomLinearModel(CustomModel):
                 C=self.lambda_,
                 solver=solver,
                 max_iter=2000,
-                # multi_class='auto'
+                random_state=self.random_state,
             )
             self.target_scaler = None
         else:
@@ -1324,10 +1328,10 @@ class OOFCustomLinearModel(OOFCustomModel):
                  cat_method='ohe',
                  scale_binary=True,
                  n_splits:int=5,
-                 random_state:int=42,
                  linear_model_type='lasso',    # linear, lasso, ridge
                  lambda_: Literal['low', 'medium', 'high', float] = 'medium',                    # single regularization strength param
-                 max_degree: int = 1
+                 max_degree: int = 1,
+                 random_state:int=42,
                  ):
         base_model_kwargs = {
             'target_type': target_type,
@@ -1338,6 +1342,7 @@ class OOFCustomLinearModel(OOFCustomModel):
             'linear_model_type': linear_model_type,
             'lambda_': lambda_,
             'max_degree': max_degree,
+            'random_state': random_state,
         }
         super().__init__(
             target_type=target_type,
@@ -1348,14 +1353,15 @@ class OOFCustomLinearModel(OOFCustomModel):
         )
 
 class GroupedCustomLinearModel:
-    def __init__(self, target_type, group_col='auto', min_samples=200):
+    def __init__(self, target_type, group_col='auto', min_samples=200, random_state:int=42):
         self.target_type = target_type
         self.group_col   = group_col
         self.min_samples = min_samples
+        self.random_state = random_state
 
     def fit(self, X, y):
         # --- global model ---
-        self.global_model_ = CustomLinearModel(target_type=self.target_type)
+        self.global_model_ = CustomLinearModel(target_type=self.target_type, random_state=self.random_state)
         self.global_model_.fit(X, y)
 
         if self.group_col == 'auto':
@@ -1368,7 +1374,7 @@ class GroupedCustomLinearModel:
             y_use = y[X[self.group_col]==g]
             print(f'Category {g}: {len(X_use)} samples')
             if len(X_use)>20:
-                self.group_models_[g] = CustomLinearModel(target_type=self.target_type).fit(X_use, y_use)
+                self.group_models_[g] = CustomLinearModel(target_type=self.target_type, random_state=self.random_state).fit(X_use, y_use)
             else:
                 # not enough data for group-specific model
                 self.group_models_[g] = self.global_model_
@@ -1415,6 +1421,7 @@ class CustomKNNModel(CustomModel):
                  n_neighbors:int=20,
                  weights:str='distance',
                  p:float=2,
+                 random_state:int=42,
                  ):
         super().__init__(target_type=target_type, scaler=scaler, standardize_target=standardize_target)
         self.n_neighbors = n_neighbors
@@ -1423,11 +1430,11 @@ class CustomKNNModel(CustomModel):
         # FIXME: Currently we never use the kNN model directly without the OOF model. If we would want to do so, we would need logic that excludes train self-samples to avoid data leakage.
 
         if self.target_type == 'regression':
-            self.model = KNeighborsRegressor(n_neighbors=self.n_neighbors, weights=self.weights, p=self.p)
+            self.model = KNeighborsRegressor(n_neighbors=self.n_neighbors, weights=self.weights, p=self.p, random_state=self.random_state)
         elif self.target_type == 'binary':
-            self.model = KNeighborsClassifier(n_neighbors=self.n_neighbors, weights=self.weights, p=self.p)
+            self.model = KNeighborsClassifier(n_neighbors=self.n_neighbors, weights=self.weights, p=self.p, random_state=self.random_state)
         elif self.target_type == 'multiclass':
-            self.model = KNeighborsClassifier(n_neighbors=self.n_neighbors, weights=self.weights, p=self.p)
+            self.model = KNeighborsClassifier(n_neighbors=self.n_neighbors, weights=self.weights, p=self.p, random_state=self.random_state)
         else:
             raise ValueError("target_type must be 'binary', 'multiclass', or 'regression'")
 
@@ -1450,10 +1457,10 @@ class OOFCustomKNNModel(OOFCustomModel):
                  scaler='squashing',
                  standardize_target=True,
                  n_splits:int=5,
-                 random_state:int=42,
                  n_neighbors:int=20,
                  weights:str='distance',
                  p:float=2,
+                 random_state:int=42,
                  ):
         base_model_kwargs = {
             'target_type': target_type,
@@ -1461,7 +1468,8 @@ class OOFCustomKNNModel(OOFCustomModel):
             'standardize_target': standardize_target,
             'n_neighbors': n_neighbors,
             'weights': weights,
-            'p': p
+            'p': p,
+            'random_state': random_state,
         }
         super().__init__(
             target_type=target_type,
@@ -1591,14 +1599,15 @@ class CustomExtraTreeModel(CustomModel):
     def __init__(self, 
                  target_type,
                  min_samples_leaf=5,
+                 random_state=None,
                  ):
-        super().__init__(target_type=target_type)
+        super().__init__(target_type=target_type, random_state=random_state)
         self.min_samples_leaf = min_samples_leaf
 
         if target_type == 'regression':
-            self.model = ExtraTreeRegressor(min_samples_leaf=self.min_samples_leaf)
+            self.model = ExtraTreeRegressor(min_samples_leaf=self.min_samples_leaf, random_state=self.random_state)
         elif target_type in ['binary', 'multiclass']:
-            self.model = ExtraTreeClassifier(min_samples_leaf=self.min_samples_leaf)
+            self.model = ExtraTreeClassifier(min_samples_leaf=self.min_samples_leaf, random_state=self.random_state)
         else:
             raise ValueError("target_type must be 'binary', 'multiclass', or 'regression'")
 
@@ -1625,8 +1634,8 @@ class CustomExtraTreeModel(CustomModel):
 ### Init score functionality
 
 class OOFLinearInitScore(OOFCustomLinearModel):
-    def __init__(self, target_type: str, init_kwargs=dict(), **lin_kwargs):
-        super().__init__(target_type=target_type, **init_kwargs, **lin_kwargs)
+    def __init__(self, target_type: str, init_kwargs=dict(), random_state=None, **lin_kwargs):
+        super().__init__(target_type=target_type, random_state=random_state, **init_kwargs, **lin_kwargs)
 
     def init_score(self, X_in, is_train=False, **kwargs):
         X = X_in.copy()
@@ -1637,8 +1646,8 @@ class OOFLinearInitScore(OOFCustomLinearModel):
             return self.decision_function(X, is_train=is_train)
         
 class OOFKNNInitScore(OOFCustomKNNModel):
-    def __init__(self, target_type: str, init_kwargs=dict(), **lin_kwargs):
-        super().__init__(target_type=target_type, **init_kwargs, **lin_kwargs)
+    def __init__(self, target_type: str, init_kwargs=dict(), random_state=None, **lin_kwargs):
+        super().__init__(target_type=target_type, random_state=random_state, **init_kwargs, **lin_kwargs)
 
     def init_score(self, X_in, is_train=False, **kwargs):
         X = X_in.copy()
@@ -1649,8 +1658,8 @@ class OOFKNNInitScore(OOFCustomKNNModel):
             return self.decision_function(X, is_train=is_train)
 
 class LinearInitScore(CustomLinearModel):
-    def __init__(self, target_type: str, init_kwargs=dict(), **lin_kwargs):
-        super().__init__(target_type=target_type, **init_kwargs, **lin_kwargs)
+    def __init__(self, target_type: str, init_kwargs=dict(), random_state=None, **lin_kwargs):
+        super().__init__(target_type=target_type, random_state=random_state, **init_kwargs, **lin_kwargs)
 
     def init_score(self, X_in, **kwargs):
         X = X_in.copy()
@@ -1664,8 +1673,8 @@ class LinearInitScore(CustomLinearModel):
             return self.decision_function(X)
 
 class GroupedLinearInitScore(GroupedCustomLinearModel):
-    def __init__(self, target_type: str, **lin_kwargs):
-        super().__init__(target_type=target_type, **lin_kwargs)
+    def __init__(self, target_type: str, random_state=None, **lin_kwargs):
+        super().__init__(target_type=target_type, random_state=random_state, **lin_kwargs)
     
     def init_score(self, X_in, **kwargs):
         X = X_in.copy()
