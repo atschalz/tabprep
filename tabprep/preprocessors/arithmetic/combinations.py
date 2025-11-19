@@ -17,7 +17,7 @@ def get_all_bivariate_interactions(
 
     # Sample combinations directly instead of shuffling entire array
     if len(combs) > max_base_interactions:
-        combs = combs[rng.random.choice(len(combs), max_base_interactions, replace=False)]
+        combs = combs[rng.choice(len(combs), max_base_interactions, replace=False)]
 
     feat0, feat1 = combs.T
     results = []
