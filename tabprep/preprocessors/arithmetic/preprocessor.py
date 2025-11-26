@@ -7,6 +7,8 @@ import re
 from time import perf_counter
 from contextlib import contextmanager
 
+from numba import njit, prange
+
 class TimerLog:
     def __init__(self):
         self.times = {}
@@ -32,7 +34,106 @@ def remove_same_range_features(X, x):
     feature_names = [f for f in re.split(r'_(x|/|\+|\-)_', col) if f not in {'*', '/', '+', '-'}]
 
     return X[feature_names].corrwith(x, method='spearman').max()
-# X_int.apply(lambda x: self.remove_same_range_features(X_num, x)).abs()
+
+# Map from name-encoded tokens to actual ops
+OP_TOKENS = {
+    '_+_': '+',
+    '_-_': '-',
+    '_*_': '*',
+    '_/_': '/',
+}
+
+# Compact op codes for numba
+OP_CODE = {
+    '+': 0,
+    '-': 1,
+    '*': 2,
+    '/': 3,
+}
+
+
+def parse_feature_expr(name: str, base_idx: dict):
+    """
+    Parse a feature name like 'colA_*_colB_*_colC' into:
+      - indices: list[int] of base column indices
+      - ops:     list[int] of op codes between them (len = order-1)
+    Returns (indices, op_codes) or (None, None) if unparsable.
+    """
+    expr = name
+    for tok in OP_TOKENS.keys():
+        expr = expr.replace(tok, f' {tok} ')
+
+    parts = expr.split()
+    if not parts:
+        return None, None
+
+    operands = parts[0::2]   # col names
+    op_tokens = parts[1::2]  # '_+_', '_*_', ...
+
+    if len(op_tokens) != max(0, len(operands) - 1):
+        return None, None
+
+    try:
+        indices = [base_idx[col] for col in operands]
+    except KeyError:
+        return None, None
+
+    ops = []
+    for tok in op_tokens:
+        op_char = OP_TOKENS.get(tok)
+        if op_char is None or op_char not in OP_CODE:
+            return None, None
+        ops.append(OP_CODE[op_char])
+
+    return indices, ops
+
+
+@njit(parallel=True, fastmath=True)
+def eval_order_fused(X_base_T, idx_mat, op_mat):
+    """
+    Fused, parallel evaluation for all features of a given order.
+
+    X_base_T: (n_base, n_rows) float64, transposed base matrix
+    idx_mat:  (n_feats, order) int32, column indices into X_base_T
+    op_mat:   (n_feats, order-1) int8, op codes between operands for each feature
+
+    Returns: (n_rows, n_feats) float64
+    """
+    n_base, n_rows = X_base_T.shape
+    n_feats, order = idx_mat.shape
+
+    out = np.empty((n_rows, n_feats), dtype=X_base_T.dtype)
+
+    for i in prange(n_rows):
+        for f in range(n_feats):
+            # First operand
+            idx0 = idx_mat[f, 0]
+            val = X_base_T[idx0, i]
+
+            # Fold remaining operands
+            for k in range(1, order):
+                idxk = idx_mat[f, k]
+                b = X_base_T[idxk, i]
+                op = op_mat[f, k - 1]
+
+                if op == 0:      # +
+                    val = val + b
+                elif op == 1:    # -
+                    val = val - b
+                elif op == 2:    # *
+                    val = val * b
+                else:            # /
+                    if b == 0.0:
+                        val = np.nan
+                    else:
+                        val = val / b
+
+            out[i, f] = val
+
+    return out
+
+
+
 
 class ArithmeticPreprocessor(BasePreprocessor):
     def __init__(
@@ -45,6 +146,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
         max_new_feats: int = 2000,
         random_state: int = 42,
         selection_method: Literal['spearman', 'random'] = 'random',
+        interaction_types: list[str] = ['/', '*', '-', '+'],
 
         # Efficiency parameters
         subsample: int = 100000,  # TODO: Need to implement
@@ -80,11 +182,14 @@ class ArithmeticPreprocessor(BasePreprocessor):
         self.cross_corr_n_block_size = cross_corr_n_block_size
         self.max_accept_for_pairwise = max_accept_for_pairwise
         self.verbose = verbose
+        self.interaction_types = interaction_types
 
         self.rng = np.random.default_rng(random_state)
 
         self.timelog = TimerLog()
         self.new_feats = []
+        self.order_batches = {}  # order -> {'idx': np.ndarray, 'ops': np.ndarray, 'names': list[str]}
+
 
     def spearman_selection(self, X, y):
         # FIXME: Currently heavily relies on polars for performance, make sure a numpy and a polars version exists for each function
@@ -120,10 +225,10 @@ class ArithmeticPreprocessor(BasePreprocessor):
             # 6. Generate higher-order interaction features
             with self.timelog.block(f"get_interactions_{order}-order"):
                 if order == 2:
-                    X_int_higher = get_all_bivariate_interactions(X, order=2, max_base_interactions=int(self.max_accept_for_pairwise / 5), random_state=self.rng)
+                    X_int_higher = get_all_bivariate_interactions(X, order=2, max_base_interactions=int(self.max_accept_for_pairwise / 5), random_state=self.rng, interaction_types=self.interaction_types)
                     X_int = X.copy()
                 else:
-                    X_int_higher = add_higher_interaction(X, X_int, max_base_interactions=int(self.max_accept_for_pairwise / 5), random_state=self.rng)
+                    X_int_higher = add_higher_interaction(X, X_int, max_base_interactions=int(self.max_accept_for_pairwise / 5), random_state=self.rng, interaction_types=self.interaction_types)
 
             if self.reduce_memory:
                 with self.timelog.block(f"reduce_memory_{order}-order"):
@@ -194,10 +299,10 @@ class ArithmeticPreprocessor(BasePreprocessor):
             # 6. Generate higher-order interaction features
             with self.timelog.block(f"get_interactions_{order}-order"):
                 if order == 2:
-                    X_int_higher = get_all_bivariate_interactions(X, order=2, max_base_interactions=int(self.max_new_feats/5), random_state=self.rng)
+                    X_int_higher = get_all_bivariate_interactions(X, order=2, max_base_interactions=int(self.max_new_feats/5), random_state=self.rng, interaction_types=self.interaction_types)
                     X_int = X.copy()
                 else:
-                    X_int_higher = add_higher_interaction(X, X_int, max_base_interactions=int(self.max_new_feats/5), random_state=self.rng)
+                    X_int_higher = add_higher_interaction(X, X_int, max_base_interactions=int(self.max_new_feats/5), random_state=self.rng, interaction_types=self.interaction_types)
 
             with self.timelog.block(f"reduce_memory_{order}-order"):
                 X_int_higher = reduce_memory_usage(X_int_higher, rescale=False, verbose=self.verbose)
@@ -259,93 +364,136 @@ class ArithmeticPreprocessor(BasePreprocessor):
         else:
             self.spearman_selection(X, y)
 
-        # self.new_feats_compiled = [e.replace('_/_', '/').replace('_*_', '*').replace('_+_', '+').replace('_-_', '-') for e in self.new_feats]
-        self._compile_expressions() # Assumes that self.new_feats is populated
+        self._prepare_order_batches()
+        self._warmup_fused_orders()
+
         self.time_logs = self.timelog.summary(verbose=self.verbose)
+
         return self
     
-    def _compile_expressions(self):
-        # map every base column to a safe token (v0, v1, ...)
-        base_cols = list(self.used_base_cols)  # or whatever you track
-        self.col_map = {c: f'v{i}' for i, c in enumerate(base_cols)}
-        self.inv_col_map = {v: k for k, v in self.col_map.items()}  # optional
+    def _post_hoc_adjust_new_feats(self, new_feats):
+        # In case some new features were removed after fit (e.g., due to memory issues), adjust the new_feats list
+        self.new_feats = [f for f in self.new_feats if f in new_feats]
+        self._prepare_order_batches()
+        self._warmup_fused_orders()
 
-        # one regex to replace exact column names (longest-first to avoid substr hits)
-        pat = re.compile('|'.join(map(re.escape, sorted(self.col_map, key=len, reverse=True))))
+    def _warmup_fused_orders(self):
+        """
+        Trigger Numba JIT for each order group during fit(),
+        so transform() is consistently fast.
+        """
+        if not self.order_batches:
+            return
 
-        def _normalize(expr: str) -> str:
-            expr = (expr
-                    .replace('_*_', '*')
-                    .replace('_/_', '/')
-                    .replace('_+_', '+')
-                    .replace('_-_', '-'))
-            return pat.sub(lambda m: self.col_map[m.group(0)], expr)
+        # tiny dummy data: 2 rows, same number of base cols
+        dummy_X_T = np.zeros((len(self.used_base_cols), 2), dtype=np.float64)
 
-        self.new_feats_compiled = {name: _normalize(name) for name in self.new_feats}
-        
+        for order, batch in self.order_batches.items():
+            idx_mat = batch['idx']
+            ops_mat = batch['ops']
+            if idx_mat.size == 0:
+                continue
+            eval_order_fused(dummy_X_T, idx_mat, ops_mat)
+
+
+    def _prepare_order_batches(self):
+        """
+        Build per-order fused execution plans from self.new_feats.
+
+        For each interaction feature, we parse:
+        - its base column indices
+        - the sequence of op codes between operands
+
+        and group them by interaction order.
+        """
+        self.order_batches = {}
+
+        base_idx = {col: i for i, col in enumerate(self.used_base_cols)}
+
+        for name in self.new_feats:
+            indices, ops = parse_feature_expr(name, base_idx)
+            if indices is None:
+                if self.verbose:
+                    print(f"[ArithmeticPreprocessor] Skipping unparsable feature name: {name}")
+                continue
+
+            order = len(indices)
+            if order < 2:
+                # Interactions are typically order>=2; skip or handle separately if needed
+                continue
+
+            batch = self.order_batches.setdefault(order, {
+                'idx': [],
+                'ops': [],
+                'names': [],
+            })
+            batch['idx'].append(indices)
+            batch['ops'].append(ops)
+            batch['names'].append(name)
+
+        # Convert lists to numpy arrays for numba
+        for order, batch in self.order_batches.items():
+            idx_mat = np.asarray(batch['idx'], dtype=np.int32)
+            ops_mat = np.zeros((idx_mat.shape[0], order - 1), dtype=np.int8)
+            for i, ops in enumerate(batch['ops']):
+                if len(ops) != order - 1:
+                    # shouldn't happen if parsing is consistent
+                    raise ValueError(f"Feature with order {order} has wrong ops length: {len(ops)}")
+                for k, op_code in enumerate(ops):
+                    ops_mat[i, k] = op_code
+
+            batch['idx'] = idx_mat
+            batch['ops'] = ops_mat
+
+    def _warmup_fused_batches(self):
+        if not self.batches:
+            return
+        dummy_X = np.zeros((2, len(self.used_base_cols)), dtype=np.float64)
+        for (op, order), group in self.batches.items():
+            idx_mat = group['indices']
+            op_code = group['op_code']
+            if idx_mat.size == 0:
+                continue
+            eval_batch_fused(dummy_X, idx_mat, op_code)
+
     def _transform(self, X_in, **kwargs):
         X = X_in.copy()
-        if len(self.new_feats) == 0:
+
+        if not self.order_batches:
             return pd.DataFrame(index=X.index)
 
-        X = X[self.used_base_cols]
+        # Same preprocessing as in fit
         if self.cat_as_num:
             X = self.cat_as_num_preprocessor.transform(X)
+        X = X[self.used_base_cols]
 
-        local = {tok: X[orig].to_numpy(dtype='float64', copy=False)
-                for orig, tok in self.col_map.items()}
-        new = {name: pd.eval(expr, local_dict=local, engine="numexpr")
-            for name, expr in self.new_feats_compiled.items()}
-        X_out = pd.DataFrame(new, index=X.index)
-        return X_out.replace([np.inf, -np.inf], np.nan)
+        # Base matrix and its transpose for better locality
+        X_base = X.to_numpy(dtype='float64', copy=False)
+        X_base_T = X_base.T   # shape: (n_base, n_rows)
 
+        n_rows = X_base.shape[0]
 
-if __name__ == "__main__":
+        blocks = []
+        col_names = []
 
-    import openml
-    from tabarena.benchmark.task.openml import OpenMLTaskWrapper
-    from tabarena.nips2025_utils.fetch_metadata import load_task_metadata
-    from tabprep.utils.modeling_utils import adjust_target_format
+        # Evaluate one fused batch per order
+        for order in sorted(self.order_batches.keys()):
+            batch = self.order_batches[order]
+            idx_mat = batch['idx']   # (n_feats_order, order)
+            ops_mat = batch['ops']   # (n_feats_order, order-1)
 
-    metadata = load_task_metadata()
-    dataset_names = metadata.sort_values('n_samples_train_per_fold').name.tolist()
+            if idx_mat.size == 0:
+                continue
 
-# ['blood-transfusion-service-center', 'diabetes', 'anneal', 'QSAR_fish_toxicity', 'credit-g', 'maternal_health_risk', 'concrete_compressive_strength', 
-# 'qsar-biodeg', 'healthcare_insurance_expenses', 'website_phishing', 'Fitness_Club', 'airfoil_self_noise', 'Another-Dataset-on-used-Fiat-500', 'MIC', 
-# 'Is-this-a-good-customer', 'Marketing_Campaign', 'hazelnut-spread-contaminant-detection', 'seismic-bumps', 'splice', 'Bioresponse', 'hiva_agnostic', 
-# 'students_dropout_and_academic_success', 'churn', 'QSAR-TID-11', 'polish_companies_bankruptcy', 'wine_quality', 'taiwanese_bankruptcy_prediction', 
-# 'NATICUSdroid', 'coil2000_insurance_policies', 'Bank_Customer_Churn', 'heloc', 'jm1', 'E-CommereShippingData', 'online_shoppers_intention',
-#  'in_vehicle_coupon_recommendation', 'miami_housing', 'HR_Analytics_Job_Change_of_Data_Scientists', 'houses', 'superconductivity', 
-# 'credit_card_clients_default', 'Amazon_employee_access', 'bank-marketing', 'Food_Delivery_Time', 'physiochemical_protein', 'kddcup09_appetency',
-#  'diamonds', 'Diabetes130US', 'APSFailure', 'SDSS17', 'customer_satisfaction_in_airline', 'GiveMeSomeCredit']
-    # dataset_names = ['concrete_compressive_strength']
-    dataset_name = 'diabetes' 
-    for num, dataset_name in enumerate(dataset_names):
-        if num < 45:
-            continue
-        print('==='*20)
-        print(f"Processing {num} dataset: {dataset_name}")
-        print('==='*20)
+            block = eval_order_fused(X_base_T, idx_mat, ops_mat)  # (n_rows, n_feats_order)
+            blocks.append(block)
+            col_names.extend(batch['names'])
 
-        tid = int(metadata.loc[metadata.name==dataset_name,'tid'].iloc[0])
-        task = OpenMLTaskWrapper(openml.tasks.get_task(tid))
+        if not blocks:
+            return pd.DataFrame(index=X.index)
 
-        fold = 0
-        repeat = 0
-        sample = None
+        out_mat = np.hstack(blocks)
+        X_out = pd.DataFrame(out_mat, columns=col_names, index=X.index)
+        X_out = X_out.replace([np.inf, -np.inf], np.nan)
 
-        X, y, X_test, y_test = task.get_train_test_split(fold=fold, repeat=repeat)
-        target_type = task.problem_type
-
-        y = adjust_target_format(y, target_type)
-        y_test = adjust_target_format(y_test, target_type)
-
-        X = X.reset_index(drop=True)
-        y = y.reset_index(drop=True)
-        X_test = X_test.reset_index(drop=True)
-        y_test = y_test.reset_index(drop=True)
-
-        print(f"Dataset: {dataset_name}, n_samples: {X.shape[0]}, n_features: {X.shape[1]}")
-        prep = ArithmeticPreprocessor()
-        prep.fit(X, y)
-        X_new = prep.transform(X)
+        return X_out
