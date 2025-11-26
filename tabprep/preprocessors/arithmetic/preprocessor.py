@@ -3,11 +3,14 @@ from tabprep.preprocessors.arithmetic.filtering import *
 from tabprep.preprocessors.arithmetic.memory import *
 from tabprep.preprocessors.base import BasePreprocessor
 import re
+from pandas.api.types import is_numeric_dtype
 
 from time import perf_counter
 from contextlib import contextmanager
 
 from numba import njit, prange
+
+from math import comb
 
 class TimerLog:
     def __init__(self):
@@ -31,7 +34,7 @@ class TimerLog:
 
 def remove_same_range_features(X, x):
     col = x.name
-    feature_names = [f for f in re.split(r'_(x|/|\+|\-)_', col) if f not in {'*', '/', '+', '-'}]
+    feature_names = [f for f in re.split(r'_(\*|/|\+|\-)_', col) if f not in {'*', '/', '+', '-'}]
 
     return X[feature_names].corrwith(x, method='spearman').max()
 
@@ -132,9 +135,6 @@ def eval_order_fused(X_base_T, idx_mat, op_mat):
 
     return out
 
-
-
-
 class ArithmeticPreprocessor(BasePreprocessor):
     def __init__(
         self,
@@ -147,6 +147,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
         random_state: int = 42,
         selection_method: Literal['spearman', 'random'] = 'random',
         interaction_types: list[str] = ['/', '*', '-', '+'],
+        remove_constant_mostlynan: bool = True,
 
         # Efficiency parameters
         subsample: int = 100000,  # TODO: Need to implement
@@ -183,6 +184,11 @@ class ArithmeticPreprocessor(BasePreprocessor):
         self.max_accept_for_pairwise = max_accept_for_pairwise
         self.verbose = verbose
         self.interaction_types = interaction_types
+        self.remove_constant_mostlynan = remove_constant_mostlynan
+
+        for i in self.interaction_types:
+            if i not in OP_CODE:
+                raise ValueError(f"Unsupported interaction type: {i}")
 
         self.rng = np.random.default_rng(random_state)
 
@@ -190,6 +196,31 @@ class ArithmeticPreprocessor(BasePreprocessor):
         self.new_feats = []
         self.order_batches = {}  # order -> {'idx': np.ndarray, 'ops': np.ndarray, 'names': list[str]}
 
+    def estimate_no_of_new_features(self, X: pd.DataFrame) -> int:
+        # 1. Determine the no. of base features
+        pass_cardinality_filter = X.nunique().values>=self.min_cardinality
+        pass_cat_filter = X.apply(is_numeric_dtype).values if not self.cat_as_num else np.array([True]*X.shape[1])
+        base_feat_mask = pass_cardinality_filter & pass_cat_filter
+        num_base_feats = min(np.sum(base_feat_mask), self.max_base_feats)
+
+        # 2. Estimate the no. of new arithmetic features per order
+        no_interaction_types = len(self.interaction_types)
+        num_new_feats = 0
+        for order in range(2, self.max_order+1):
+            if order > num_base_feats:
+                break
+            if order == 2: 
+                if '/' in self.interaction_types:
+                    no_interaction_types += 1
+                num_new_feats = comb(num_base_feats, 2)*no_interaction_types #num_base_feats*(num_base_feats-1)/2*no_interaction_types
+                if '/' in self.interaction_types:
+                    no_interaction_types -= 1
+            else:
+                num_new_feats += ((((num_base_feats-2)*(num_new_feats))) * no_interaction_types)
+            if num_new_feats > self.max_new_feats:
+                num_new_feats = self.max_new_feats
+                break
+        return int(num_new_feats)
 
     def spearman_selection(self, X, y):
         # FIXME: Currently heavily relies on polars for performance, make sure a numpy and a polars version exists for each function
@@ -247,7 +278,7 @@ class ArithmeticPreprocessor(BasePreprocessor):
             n_feats_start = X_int_higher.shape[1]
             # basic
             with self.timelog.block(f"basic_filter_{order}-order"):
-                X_int_higher = basic_filter(X_int_higher, use_polars=False, min_cardinality=self.min_cardinality)
+                X_int_higher = basic_filter(X_int_higher, use_polars=False, min_cardinality=self.min_cardinality, remove_constant_mostlynan=self.remove_constant_mostlynan)
             if self.verbose:
                 print(f"Using {len(X_int_higher.columns)}/{n_feats_start} features after basic filtering")
 
@@ -289,6 +320,8 @@ class ArithmeticPreprocessor(BasePreprocessor):
                 break
 
     def random_selection(self, X, y):
+        X_dict = {1: X}
+        
         for order in range(2, self.max_order+1):
             if order > X.shape[1]:
                 break
@@ -299,21 +332,21 @@ class ArithmeticPreprocessor(BasePreprocessor):
             # 6. Generate higher-order interaction features
             with self.timelog.block(f"get_interactions_{order}-order"):
                 if order == 2:
-                    X_int_higher = get_all_bivariate_interactions(X, order=2, max_base_interactions=int(self.max_new_feats/5), random_state=self.rng, interaction_types=self.interaction_types)
-                    X_int = X.copy()
+                    X_dict[2] = get_all_bivariate_interactions(X, order=2, max_feats=self.max_new_feats, random_state=self.rng, interaction_types=self.interaction_types)
+                    # X_dict[order] = add_higher_interaction(X, X, max_feats=self.max_new_feats, random_state=self.rng, interaction_types=self.interaction_types)
                 else:
-                    X_int_higher = add_higher_interaction(X, X_int, max_base_interactions=int(self.max_new_feats/5), random_state=self.rng, interaction_types=self.interaction_types)
+                    X_dict[order] = add_higher_interaction(X, X_dict[order-1], max_feats=self.max_new_feats - X_dict[order-1].shape[1], random_state=self.rng, interaction_types=self.interaction_types)
 
             with self.timelog.block(f"reduce_memory_{order}-order"):
-                X_int_higher = reduce_memory_usage(X_int_higher, rescale=False, verbose=self.verbose)
+                X_dict[order] = reduce_memory_usage(X_dict[order], rescale=False, verbose=self.verbose)
+                # X_dict[order] = basic_filter(X_dict[order], use_polars=False, min_cardinality=self.min_cardinality, remove_constant_mostlynan=self.remove_constant_mostlynan)
             if self.verbose:
-                print(f"Generated {X_int_higher.shape[1]} {order}-order interaction features")
+                print(f"Generated {X_dict[order].shape[1]} {order}-order interaction features")
 
-            X_int = X_int_higher # pd.concat([X_int, X_int_higher], axis=1)
-
-            self.new_feats.extend(X_int_higher.columns.tolist())
+            self.new_feats.extend(X_dict[order].columns.tolist())
 
             if len(self.new_feats) >= self.max_new_feats:
+                self.new_feats = self.new_feats[:self.max_new_feats]
                 if self.verbose:
                     print(f"Reached max new features limit of {self.max_new_feats}. Stopping.")
                 break
@@ -331,11 +364,6 @@ class ArithmeticPreprocessor(BasePreprocessor):
         X = X.reset_index(drop=True)
         y = y.reset_index(drop=True) if y is not None else None
 
-        ### Reduce memory usage
-        if self.reduce_memory:
-            with self.timelog.block("reduce_memory_usage_base"):
-                X = reduce_memory_usage(X, rescale=self.rescale_avoid_overflow, verbose=self.verbose)
-
         ### if categorical-as-numerical is enabled, convert categorical features to numerical
         if self.cat_as_num:
             self.cat_as_num_preprocessor = CatAsNumTransformer(keep_original=False)
@@ -347,16 +375,22 @@ class ArithmeticPreprocessor(BasePreprocessor):
                     print('No numeric features available. Exiting.')
                 return self
 
-        ### Apply basic filtering steps
-        n_base_feats_start = X.shape[1]
-        with self.timelog.block("basic_filter_base"):
-            X = basic_filter(X, use_polars=False, min_cardinality=self.min_cardinality) # TODO: Make data adaptive and use more restrictive threshold for large datasets
-        if self.verbose:
-            print(f"Using {len(X.columns)}/{n_base_feats_start} features after basic filtering")
         if X.shape[1] > self.max_base_feats:
             if self.verbose:
                 print(f"Limiting base features to {self.max_base_feats} (from {X.shape[1]})")
             X = X.sample(n=self.max_base_feats, random_state=42, axis=1)
+
+        ### Reduce memory usage
+        if self.reduce_memory:
+            with self.timelog.block("reduce_memory_usage_base"):
+                X = reduce_memory_usage(X, rescale=self.rescale_avoid_overflow, verbose=self.verbose)
+
+        ### Apply basic filtering steps
+        n_base_feats_start = X.shape[1]
+        with self.timelog.block("basic_filter_base"):
+            X = basic_filter(X, use_polars=False, min_cardinality=self.min_cardinality, remove_constant_mostlynan=self.remove_constant_mostlynan) # TODO: Make data adaptive and use more restrictive threshold for large datasets
+        if self.verbose:
+            print(f"Using {len(X.columns)}/{n_base_feats_start} features after basic filtering")
         self.used_base_cols = X.columns.tolist()
 
         if self.selection_method == 'random':
