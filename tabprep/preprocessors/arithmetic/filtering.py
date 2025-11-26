@@ -22,7 +22,8 @@ def basic_filter(
         # y_in: pd.Series,
         min_cardinality: int = 3,
         candidate_cols: list = None,
-        use_polars: bool = False
+        use_polars: bool = False,
+        remove_constant_mostlynan: bool = True,
         ) -> list:
     X = X_in.copy()
     
@@ -36,14 +37,15 @@ def basic_filter(
     if candidate_cols is not None:
         X = X[candidate_cols]
 
-    if use_polars:
-        from tabprep.preprocessors.arithmetic.filtering_polars import remove_mostlynan_features_pl, remove_constant_features_pl
-        X = remove_mostlynan_features_pl(X)
-        X = remove_constant_features_pl(X)
-    else:
-        X = remove_mostlynan_features(X)
-        # TODO: Think whether we need this, was uncommented previously
-        X = remove_constant_features(X)
+    if remove_constant_mostlynan:
+        if use_polars:
+            from tabprep.preprocessors.arithmetic.filtering_polars import remove_mostlynan_features_pl, remove_constant_features_pl
+            X = remove_mostlynan_features_pl(X)
+            X = remove_constant_features_pl(X)
+        else:
+            X = remove_mostlynan_features(X)
+            # TODO: Think whether we need this, was uncommented previously
+            X = remove_constant_features(X)
 
     return X
 
