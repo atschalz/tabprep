@@ -6,7 +6,7 @@ from math import comb
 def get_all_bivariate_interactions(
     X_num, 
     order=2, 
-    max_base_interactions=10000,
+    max_feats=2000,
     interaction_types=['/', '*', '-', '+'], # TODO: make inverse_div an own op
     random_state=None
 ):
@@ -16,11 +16,9 @@ def get_all_bivariate_interactions(
     combs = np.array(list(combinations(cols, order)))
 
     # Sample combinations directly instead of shuffling entire array
-    if len(combs) > max_base_interactions:
-        combs = combs[rng.choice(len(combs), max_base_interactions, replace=False)]
+    combs = combs[rng.choice(len(combs), np.min([len(combs), max_feats]), replace=False)]
 
     feat0, feat1 = combs.T
-    results = []
 
     # Pre-cache arrays for speed
     arr = X_num.to_numpy()
@@ -30,29 +28,30 @@ def get_all_bivariate_interactions(
     def get_pair_arrays(f0, f1):
         return arr[:, [col_idx[c] for c in f0]], arr[:, [col_idx[c] for c in f1]]
 
-    for op in interaction_types:
-        A, B = get_pair_arrays(feat0, feat1)
-        # Avoid division by zero with masking instead of replace()
-        with np.errstate(divide='ignore', invalid='ignore', over="ignore"):
-            if op == '/':
-                div1 = A / np.where(B == 0, np.nan, B)
-                div2 = B / np.where(A == 0, np.nan, A)
-                df1 = pd.DataFrame(div1, columns=[f"{a}_/_{b}" for a, b in zip(feat0, feat1)])
-                df2 = pd.DataFrame(div2, columns=[f"{b}_/_{a}" for a, b in zip(feat0, feat1)])
-                results.extend([df1, df2])
-            elif op == '*':
-                df = pd.DataFrame(A * B, columns=[f"{a}_*_{b}" for a, b in zip(feat0, feat1)])
-                results.append(df)
-            elif op == '-':
-                df = pd.DataFrame(A - B, columns=[f"{a}_-_{b}" for a, b in zip(feat0, feat1)])
-                results.append(df)
-            elif op == '+':
-                df = pd.DataFrame(A + B, columns=[f"{a}_+_{b}" for a, b in zip(feat0, feat1)])
-                results.append(df)
-            else:
-                raise ValueError(f"Unknown operator '{op}'.")
+    new_data = {}
 
-    return pd.concat(results, axis=1)
+    A, B = get_pair_arrays(feat0, feat1)
+    # Avoid division by zero with masking instead of replace()
+    with np.errstate(divide='ignore', invalid='ignore', over="ignore"):
+        if '/' in interaction_types:
+            div1 = A / np.where(B == 0, np.nan, B)
+            names = [f"{a}_/_{b}" for a, b in zip(feat0, feat1)]
+            new_data.update(dict(zip(names, div1.T)))
+        if '*' in interaction_types:
+            names = [f"{a}_*_{b}" for a, b in zip(feat0, feat1)]
+            new_data.update(dict(zip(names, (A * B).T)))
+        if '-' in interaction_types:
+            names = [f"{a}_-_{b}" for a, b in zip(feat0, feat1)]
+            new_data.update(dict(zip(names, (A - B).T)))
+        if '+' in interaction_types:
+            names = [f"{a}_+_{b}" for a, b in zip(feat0, feat1)]
+            new_data.update(dict(zip(names, (A + B).T)))
+        if '/' in interaction_types:
+            div2 = B / np.where(A == 0, np.nan, A)
+            names = [f"{b}_/_{a}" for a, b in zip(feat0, feat1)]
+            new_data.update(dict(zip(names, div2.T)))
+
+    return pd.DataFrame(new_data, index=X_num.index)
 
 def get_n_possible_interactions(n, order=2):
     return comb(n, order)
@@ -60,7 +59,7 @@ def get_n_possible_interactions(n, order=2):
 def add_higher_interaction(
         X_base, 
         X_interact, 
-        max_base_interactions=10000,
+        max_feats=2000,
         interaction_types=['/', '*', '-', '+'], # FIXME: Might need to fix bug if one of these operators occurs in feature names
         random_state=None
     ):
@@ -72,8 +71,7 @@ def add_higher_interaction(
         if j not in i
     ]
     all_pairs = np.array(all_pairs)
-    if len(all_pairs) > max_base_interactions:
-        all_pairs = all_pairs[rng.choice(len(all_pairs), max_base_interactions, replace=False)]
+    all_pairs = all_pairs[rng.choice(len(all_pairs), np.min([len(all_pairs), max_feats]), replace=False)]
     feat0, feat1 = all_pairs.T
 
     # Convert to numpy arrays once for speed
@@ -82,53 +80,66 @@ def add_higher_interaction(
 
     new_data = {}
 
-    for i_type in interaction_types:
-        # Forward and reverse divisions
+    # --- Division (/)
+    if '/' in interaction_types and len(new_data) < max_feats:
         with np.errstate(divide='ignore', invalid='ignore', over="ignore"):
-            if i_type == '/':
-                res1 = X_interact_vals / np.where(X_base_vals == 0, np.nan, X_base_vals)
-                res2 = X_base_vals / np.where(X_interact_vals == 0, np.nan, X_interact_vals)
-                names1 = [f"{a}_{i_type}_{b}" for a, b in zip(feat0, feat1)]
-                names2 = [f"{b}_{i_type}_{a}" for a, b in zip(feat0, feat1)]
-                new_data.update(dict(zip(names1, res1.T)))
-                new_data.update(dict(zip(names2, res2.T)))
+            # Forward A/B
+            res1 = X_interact_vals / np.where(X_base_vals == 0, np.nan, X_base_vals)
+            names1 = [f"{a}_/_{b}" for a, b in zip(feat0, feat1)]
+            new_data.update(dict(zip(names1, res1.T)))
 
-            elif i_type == '*':
-                # Multiplication is commutative → skip duplicate (a×b == b×a)
-                seen_pairs = set()
-                res_list, name_list = [], []
-                for a, b in zip(feat0, feat1):
-                    if tuple(sorted((a, b))) in seen_pairs:
-                        continue
-                    seen_pairs.add(tuple(sorted((a, b))))
-                    res_list.append((X_interact[a].values * X_base[b].values).astype(float))
-                    name_list.append(f"{a}_{i_type}_{b}")
-                if res_list:
-                    res_arr = np.column_stack(res_list)
-                    new_data.update(dict(zip(name_list, res_arr.T)))
+    # --- Multiplication (*), commutative: remove duplicates
+    if '*' in interaction_types and len(new_data) < max_feats:
+        # Identify unique sorted pairs
+        unique_pairs = {}
+        for a, b in zip(feat0, feat1):
+            key = tuple(sorted((a, b)))
+            if key not in unique_pairs:
+                unique_pairs[key] = (a, b)
 
-            elif i_type == '+':
-                # Addition is commutative → skip duplicate (a+b == b+a)
-                seen_pairs = set()
-                res_list, name_list = [], []
-                for a, b in zip(feat0, feat1):
-                    if tuple(sorted((a, b))) in seen_pairs: # FIXME: a can already consist of multiple features
-                        continue
-                    seen_pairs.add(tuple(sorted((a, b))))
-                    res_list.append((X_interact[a].values + X_base[b].values).astype(float))
-                    name_list.append(f"{a}_{i_type}_{b}")
-                if res_list:
-                    res_arr = np.column_stack(res_list)
-                    new_data.update(dict(zip(name_list, res_arr.T)))
+        with np.errstate(divide='ignore', invalid='ignore', over="ignore"):
+            # Compute all multiplications at once
+            res_list = [
+                (X_interact[a].values * X_base[b].values).astype(float)
+                for (a, b) in unique_pairs.values()
+            ]
+        name_list = [f"{a}_*_{b}" for (a, b) in unique_pairs.values()]
 
-            elif i_type == '-':
-                # Subtraction (non-commutative): only one direction (A−B)
-                res = X_interact_vals - X_base_vals
-                names = [f"{a}_{i_type}_{b}" for a, b in zip(feat0, feat1)]
-                new_data.update(dict(zip(names, res.T)))
+        if res_list:
+            res_arr = np.column_stack(res_list)
+            new_data.update(dict(zip(name_list, res_arr.T)))
 
-            else:
-                raise ValueError(f"Unknown interaction type: {i_type}. Use '/', '*', '-', or '+'.")
+
+    # --- Addition (+), commutative: remove duplicates
+    if '+' in interaction_types and len(new_data) < max_feats:
+        unique_pairs = {}
+        for a, b in zip(feat0, feat1):
+            key = tuple(sorted((a, b)))
+            if key not in unique_pairs:
+                unique_pairs[key] = (a, b)
+
+        res_list = [
+            (X_interact[a].values + X_base[b].values).astype(float)
+            for (a, b) in unique_pairs.values()
+        ]
+        name_list = [f"{a}_+_{b}" for (a, b) in unique_pairs.values()]
+
+        if res_list:
+            res_arr = np.column_stack(res_list)
+            new_data.update(dict(zip(name_list, res_arr.T)))
+
+    # --- Subtraction (−), non-commutative
+    if '-' in interaction_types and len(new_data) < max_feats:
+        res = X_interact_vals - X_base_vals
+        names = [f"{a}_-_{b}" for a, b in zip(feat0, feat1)]
+        new_data.update(dict(zip(names, res.T)))
+
+    # if '/' in interaction_types and len(new_data) < max_feats:
+    #     with np.errstate(divide='ignore', invalid='ignore', over="ignore"):
+    #         # Reverse B/A
+    #         res2 = X_base_vals / np.where(X_interact_vals == 0, np.nan, X_interact_vals)
+    #         names2 = [f"{b}_/_{a}" for a, b in zip(feat0, feat1)]
+    #         new_data.update(dict(zip(names2, res2.T)))
 
     # Build the new DataFrame once (fast)
     X_int_new = pd.DataFrame(new_data, index=X_interact.index)
