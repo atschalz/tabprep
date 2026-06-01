@@ -1,7 +1,7 @@
 # TabPrep: Closing the Feature Engineering Gap in Tabular Benchmarks
 
 ## What This Repo Contains
-This checkout provides a scikit-learn-friendly wrapper around the TabPrep feature generation logic from AutoGluon. The main example in this repo is `example_sklearn.py`, which compares raw features against TabPrep-transformed features using standard sklearn models.
+This repository contains examples how to use the feature generators introduced in "TabPrep: Closing the Feature Engineering Gap in Tabular Benchmarks". The current version provides a scikit-learn wrapper around the TabPrep feature generation logic that is implemented in AutoGluon. The main example in this repo is `example_sklearn.py`, which compares raw features against TabPrep-transformed features using standard sklearn models. More examples, in particular how to integrate TabPrep within benchmarking workflows of the TabArena benchmark will follow soon.
 
 ## ⚡ Quickstart
 In a Python 3.11–3.13 environment, run:
