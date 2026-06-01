@@ -8,6 +8,8 @@ In a Python 3.11–3.13 environment, run:
 ```bash
 git clone https://github.com/autogluon/autogluon.git
 ./autogluon/full_install.sh
+git clone https://github.com/autogluon/tabarena.git
+uv pip install --prerelease=allow -e "./tabarena/tabarena[benchmark]"
 python example_sklearn.py
 ```
 
